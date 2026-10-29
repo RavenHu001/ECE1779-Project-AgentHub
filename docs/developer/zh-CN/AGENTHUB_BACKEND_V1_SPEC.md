@@ -8,7 +8,7 @@
 
 ## 依据与决定状态
 
-依据为 [AgentHub 团队交接计划](AGENTHUB_TEAM_HANDOVER.md) 及其两张架构和审批流程图。以下区分三种状态：
+依据为 [AgentHub 团队交接计划](../../AGENTHUB_TEAM_HANDOVER.md) 及其两张架构和审批流程图。以下区分三种状态：
 
 | 状态 | 内容 |
 | --- | --- |

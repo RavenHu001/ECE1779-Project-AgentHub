@@ -78,7 +78,7 @@ UUID 是 PostgreSQL 支持的编号类型；`TIMESTAMPTZ` 保存时间点，并�
 | --- | --- | --- | --- |
 | `id` | `UUID` | 不可空；后端生成 | 会话编号，主键 |
 | `user_id` | `UUID` | 不可空；无默认值 | 会话所属用户；外键指向 `users.id` |
-| `title` | `TEXT` | 不可空；默认 `'新对话'` | 会话标题；保存时不能为空 |
+| `title` | `TEXT` | 不可空；默认 `'New conversation'` | 会话标题；保存时不能为空 |
 | `next_message_seq` | `BIGINT` | 不可空；默认 `1` | 下一条消息将使用的顺序号，必须大于零 |
 | `created_at` | `TIMESTAMPTZ` | 不可空；默认 `now()` | 会话创建时间 |
 | `updated_at` | `TIMESTAMPTZ` | 不可空；默认 `now()` | 会话最近更新的时间；收到新消息或修改标题时更新 |
@@ -96,7 +96,7 @@ UUID 是 PostgreSQL 支持的编号类型；`TIMESTAMPTZ` 保存时间点，并�
 | `id` | `UUID` | 不可空；后端生成 | 消息编号，主键 |
 | `conversation_id` | `UUID` | 不可空；无默认值 | 所属会话；外键指向 `conversations.id` |
 | `role` | `TEXT` | 不可空；无默认值 | 发言者类型，本阶段只允许 `user` 或 `assistant` |
-| `content` | `TEXT` | 不可空；无默认值 | 消息正文，例如“你好”或“消息已收到”；拒绝空文本和全空白文本，其余内容按原文保存 |
+| `content` | `TEXT` | 不可空；无默认值 | 消息正文，例如“你好”或“Message received.”；拒绝空文本和全空白文本，其余内容按原文保存 |
 | `seq` | `BIGINT` | 不可空；无默认值 | 该消息在会话中的顺序号，由 `next_message_seq` 分配，必须大于零 |
 | `reply_to_message_id` | `UUID` | 按角色决定；默认 `NULL` | 当前回复对应的用户消息；外键指向 `messages.id` |
 | `submission_key` | `UUID` | 按角色决定；默认 `NULL` | 用户提交标识，用于识别网络重试造成的重复提交 |
@@ -240,15 +240,15 @@ API 找到相同会话和提交标识时，比较本次正文与已保存正文�
 
 worker 以原子操作领取 J1，改成 `RUNNING`，将 `attempts` 加一，并填写开始时间与三个领取字段。“先查询，再无条件更新”不能保证多个 worker 不会领取同一工作。
 
-生成固定文字“消息已收到”后，worker 在同一个完成事务中核对当前领取权，锁定 C1 并取得下一个顺序号，然后保存：
+生成固定文字“Message received.”后，worker 在同一个完成事务中核对当前领取权，锁定 C1 并取得下一个顺序号，然后保存：
 
 | 记录 | 本次保存的主要内容 |
 | --- | --- |
-| 回复消息 M2 | `conversation_id = C1`、`role = 'assistant'`、`content = '消息已收到'`、`seq = 2`、`reply_to_message_id = M1` |
+| 回复消息 M2 | `conversation_id = C1`、`role = 'assistant'`、`content = 'Message received.'`、`seq = 2`、`reply_to_message_id = M1` |
 | 会话 C1 | `next_message_seq = 3`，更新 `updated_at` |
 | 待办 J1 | 改成 `SUCCEEDED`，填写完成时间，清空三个领取字段和错误摘要 |
 
-完成时的领取条件不再满足，或者任何写入失败，就回滚整个完成事务。查询 C1 的消息并按 `seq` 排序后，看到的就是：用户“你好”，系统“消息已收到”。
+完成时的领取条件不再满足，或者任何写入失败，就回滚整个完成事务。查询 C1 的消息并按 `seq` 排序后，看到的就是：用户“你好”，系统“Message received.”。
 
 ### 请求重发或 worker 重启
 
