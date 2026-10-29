@@ -1,0 +1,50 @@
+name: Backend CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer change replaces only the older CI run for the same Git reference.
+  # 新提交只替代同一 Git 引用的旧 CI 检查。
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  containers-and-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Generate isolated configuration
+        run: python scripts/init_env.py --project-name agenthub-ci
+      - name: Validate Compose
+        run: docker compose config --quiet
+      - name: Build runtime and test images
+        run: docker compose --profile test build api test
+      - name: Lint and format
+        run: docker compose run --rm --no-deps test sh -c 'ruff check . && ruff format --check .'
+      - name: Test with isolated PostgreSQL
+        # The test profile never connects fixtures to the development database.
+        # 测试配置不会将夹具连接到开发数据库。
+        run: docker compose run --rm test
+      - name: Start the application
+        run: docker compose up -d --wait
+      - name: Exercise live API and worker
+        run: docker compose exec -T api python -m app.smoke
+      - name: Service status on failure
+        if: failure()
+        run: docker compose ps -a
+      - name: Remove CI containers and disposable CI volumes
+        # Volume deletion is limited to this disposable CI project.
+        # 删除数据卷仅限此临时 CI 项目。
+        if: always()
+        run: docker compose --profile test down --volumes --remove-orphans
