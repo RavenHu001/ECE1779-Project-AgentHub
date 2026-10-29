@@ -135,6 +135,8 @@ System-generated defaults, validation errors, CLI prompts, logs and API descript
 
 ## Verify the live system and persistence
 
+For step-by-step Swagger or Postman checks and a result record template, use the [manual testing guide](docs/MANUAL_TESTING.md).
+
 Run the included smoke check without copying credentials onto the command line:
 
 ```bash

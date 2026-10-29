@@ -6,6 +6,7 @@ The [repository README](../README.md) is the English entry point for reviewers a
 | --- | --- |
 | [Setup and team workflow](../README.md) | Current Docker services, accounts, shared access, API examples, tests and migration workflow |
 | [Backend database reference](BACKEND_DATABASE.md) | Current four-table schema, relationships, constraints and transaction boundaries |
+| [Manual testing guide](MANUAL_TESTING.md) | Fifteen manual checks with expected outcomes and a test result record template |
 | [Architecture and team handover](AGENTHUB_TEAM_HANDOVER.md) | Original English architecture proposal; planned features are not claims of implementation |
 | [Developer documentation](developer/README.md) | Index of Chinese team explanations and historical specification drafts |
 
