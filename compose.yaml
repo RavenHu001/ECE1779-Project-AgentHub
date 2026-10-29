@@ -1,0 +1,129 @@
+# Share image and configuration across backend processes.
+# 后端各进程共用镜像和配置。
+x-backend: &backend
+  image: ${COMPOSE_PROJECT_NAME:-agenthub-dev}-backend:dev
+  build:
+    context: ./backend
+    target: runtime
+  environment: &backend-env
+    PGHOST: db
+    PGPORT: "5432"
+    PGDATABASE: ${POSTGRES_DB:-agenthub}
+    PGUSER: ${POSTGRES_USER:-agenthub}
+    PGPASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/init_env.py first}
+    BOOTSTRAP_USERNAME: ${BOOTSTRAP_USERNAME:-developer}
+    BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?Run python scripts/init_env.py first}
+    WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1}
+    WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+    WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-3}
+    FIXED_REPLY: ${FIXED_REPLY:-Message received.}
+
+services:
+  # Keep database access on the private Compose network and persist its data.
+  # 数据库只在 Compose 内部网络提供访问，并持久保存数据。
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agenthub}
+      POSTGRES_USER: ${POSTGRES_USER:-agenthub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/init_env.py first}
+      TZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Finish schema migration before initializing accounts or serving requests.
+  # 先完成结构迁移，再初始化账号和接收请求。
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Initialize the first account without resetting an existing password.
+  # 初始化首个账号，不重置已有账号密码。
+  bootstrap:
+    <<: *backend
+    command: ["python", "-m", "app.manage", "bootstrap"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Default to loopback; shared access uses an SSH tunnel or HTTPS proxy.
+  # 默认仅监听回环地址；共享访问使用 SSH 隧道或 HTTPS 代理。
+  api:
+    <<: *backend
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8000}:8000"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+
+  # Run background jobs independently of HTTP requests.
+  # 在 HTTP 请求之外独立处理后台工作。
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  # Explicitly invoked tools are not long-running default services.
+  # 管理工具按需调用，不作为默认常驻服务。
+  admin:
+    <<: *backend
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "app.manage"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Tests have a separate disposable database, never the shared development data.
+  # 测试使用独立的临时数据库，不清理共享开发数据。
+  test-db:
+    image: postgres:17-bookworm
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: agenthub_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test-only-not-used-outside-test-db
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d agenthub_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  test:
+    build:
+      context: ./backend
+      target: test
+    image: ${COMPOSE_PROJECT_NAME:-agenthub-dev}-backend-test:dev
+    profiles: ["test"]
+    environment:
+      PGHOST: test-db
+      PGPORT: "5432"
+      PGDATABASE: agenthub_test
+      PGUSER: test
+      PGPASSWORD: test-only-not-used-outside-test-db
+    depends_on:
+      test-db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
