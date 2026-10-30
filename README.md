@@ -4,6 +4,8 @@ AgentHub is a University of Toronto ECE1779 team project. This repository curren
 
 **Start here to run or review the implemented backend.** See the [database reference](docs/BACKEND_DATABASE.md) for field definitions and the [documentation index](docs/README.md) for architecture and planning material. Chinese-language notes are kept under [developer documentation](docs/developer/zh-CN/README.md).
 
+For a short explanation of the source files and how they work together, read the [code structure guide](docs/CODE_STRUCTURE.md).
+
 ## Current scope
 
 The API and worker share a Python 3.13 image. PostgreSQL 17 stores users, conversations, messages and jobs on a persistent volume. Startup waits for database readiness, applies Alembic migrations, initializes the first account, then starts the API and worker.
