@@ -6,6 +6,8 @@ AgentHub is a University of Toronto ECE1779 team project. This repository curren
 
 For a short explanation of the source files and how they work together, read the [code structure guide](docs/CODE_STRUCTURE.md).
 
+The [technology stack guide](docs/TECH_STACK.md) explains the current tools, versions and why they fit this implementation.
+
 ## Current scope
 
 The API and worker share a Python 3.13 image. PostgreSQL 17 stores users, conversations, messages and jobs on a persistent volume. Startup waits for database readiness, applies Alembic migrations, initializes the first account, then starts the API and worker.
