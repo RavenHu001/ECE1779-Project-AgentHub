@@ -121,7 +121,7 @@ function setSidebar(open) {
   $("workspace").classList.toggle("mobile-sidebar-open", mobile && open);
   $("workspace").classList.toggle("sidebar-collapsed", !mobile && !open);
   $("sidebar-overlay").hidden = !(mobile && open);
-  $("sidebar").inert = mobile && !open;
+  $("sidebar").inert = !open;
   $("sidebar-toggle").setAttribute("aria-expanded", String(open));
 }
 
@@ -216,7 +216,7 @@ $("sidebar-toggle").addEventListener("click", () => {
   setSidebar(mobile ? !$("workspace").classList.contains("mobile-sidebar-open") : $("workspace").classList.contains("sidebar-collapsed"));
 });
 $("close-sidebar").addEventListener("click", () => { setSidebar(false); $("sidebar-toggle").focus(); });
-$("sidebar-overlay").addEventListener("click", () => setSidebar(false));
+$("sidebar-overlay").addEventListener("click", () => { setSidebar(false); $("sidebar-toggle").focus(); });
 matchMedia("(max-width: 640px)").addEventListener("change", () => setSidebar(!matchMedia("(max-width: 640px)").matches));
 
 function applyTheme(theme) {

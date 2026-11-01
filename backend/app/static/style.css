@@ -2,7 +2,7 @@
 :root {
   color-scheme: light;
   --bg: #fff; --sidebar: #f7f7f8; --hover: #ededee; --selected: #e9e9eb;
-  --text: #242426; --muted: #86868d; --secondary: #64646c; --border: #e9e9ec;
+  --text: #242426; --muted: #707078; --secondary: #64646c; --border: #e9e9ec;
   --input: #fff; --bubble: #f3f3f5; --button: #262628; --button-text: #fff;
   --shadow: 0 3px 14px #00000006, 0 1px 3px #00000004; --error: #b04436;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
