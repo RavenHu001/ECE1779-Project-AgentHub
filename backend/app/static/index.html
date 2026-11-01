@@ -3,31 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentHub · Worker demo</title>
+  <meta name="color-scheme" content="light dark">
+  <title>AgentHub</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/chat.js" defer></script>
 </head>
 <body>
-  <header><div><span class="mark">A</span><strong>AgentHub</strong></div><span id="mode">Connecting…</span></header>
-  <main>
-    <section id="login-panel" class="card login">
-      <p class="eyebrow">TEAM DEVELOPMENT</p><h1>Your workspace, ready for a conversation.</h1>
-      <p class="muted">Sign in with your local development account to try the worker and saved chat history.</p>
-      <form id="login-form">
-        <label>Username<input id="username" autocomplete="username" required value="developer"></label>
-        <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
-        <button type="submit">Open workspace <span aria-hidden="true">→</span></button>
-      </form>
-      <p class="muted small">Use the bootstrap credentials in your local .env file. Credentials stay in memory for this page session. Use HTTPS outside localhost.</p>
-    </section>
-    <section id="workspace" class="workspace" hidden>
-      <aside class="card"><div class="sidebar-heading"><strong>Conversations</strong><button id="new-chat" class="secondary">+ New</button></div><nav id="conversations" aria-label="Saved conversations"></nav><button id="sign-out" class="secondary">Sign out</button></aside>
-      <section class="card chat"><div class="chat-heading"><div><p class="eyebrow">WORKER BASELINE</p><h1 id="chat-title">New conversation</h1></div><span id="job-status" role="status">Ready</span></div>
-        <div id="messages" aria-live="polite"><p class="empty">Start with a question. Your messages and replies are saved.</p></div>
-        <form id="message-form"><label for="message">Message</label><textarea id="message" rows="3" maxlength="12000" placeholder="Ask AgentHub a question…" required></textarea><div class="composer-footer"><span class="muted small">Text chat only · Business actions are not enabled</span><button id="send" type="submit">Send message ↑</button></div></form>
-      </section>
-    </section>
-    <p id="notice" role="status"></p>
-  </main>
+  <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M6 7.5 12 4l6 3.5v9L12 20l-6-3.5zM6 7.5l6 3.5 6-3.5M12 11v9M9 5.8l9 5.2M6 12l6 3.5"/></symbol>
+    <symbol id="i-compose" viewBox="0 0 24 24"><path d="M12 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M16 3l5 5-9 9-6 1 1-6zM14 5l5 5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-write" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h8"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></symbol>
+  </svg>
+  <div id="workspace" class="app-shell">
+    <button id="sidebar-overlay" class="sidebar-overlay" aria-label="Close navigation" hidden></button>
+    <aside id="sidebar" class="sidebar">
+      <div class="brand-row"><a href="/" class="brand" aria-label="AgentHub home"><svg class="brand-icon"><use href="#i-logo"/></svg>AgentHub</a><button id="close-sidebar" class="icon-button" aria-label="Close sidebar"><svg><use href="#i-panel"/></svg></button></div>
+      <div class="sidebar-actions">
+        <button id="new-chat" class="nav-action"><svg><use href="#i-compose"/></svg><span>New chat</span><kbd>Ctrl K</kbd></button>
+        <button id="search-toggle" class="nav-action"><svg><use href="#i-search"/></svg><span>Search chats</span></button>
+        <input id="search" class="search-input" type="search" placeholder="Find a conversation…" aria-label="Search conversations" hidden>
+      </div>
+      <div class="history-heading"><span>Your chats</span><span id="chat-count"></span></div>
+      <nav id="conversations" class="conversation-list" aria-label="Saved conversations"><p class="history-empty">A little less busywork.<br>A little more headspace.</p></nav>
+      <div class="sidebar-footer"><div class="workspace-label"><span class="workspace-dot"></span>Personal workspace</div><button id="sign-out" class="account-button"><span id="avatar" class="avatar">A</span><span class="account-copy"><strong id="account-name">Your workspace</strong><span id="account-action">Sign in to get started</span></span><svg><use href="#i-chevron"/></svg></button></div>
+    </aside>
+    <main id="chat" class="chat">
+      <header class="topbar"><div class="thread-heading"><button id="sidebar-toggle" class="icon-button" aria-label="Toggle sidebar" aria-expanded="true"><svg><use href="#i-panel"/></svg></button><svg class="thread-icon"><use href="#i-chat"/></svg><h1 id="chat-title">New chat</h1></div><div class="topbar-actions"><span id="job-status" class="job-status" role="status"></span><span id="mode" class="mode-badge">Connecting</span><button id="theme-toggle" class="icon-button" aria-label="Switch to dark theme" title="Change appearance"><svg><use href="#i-sun"/></svg></button></div></header>
+      <div class="chat-body">
+        <section id="welcome" class="welcome"><div class="welcome-mark"><svg><use href="#i-logo"/></svg></div><h2>What should we work on?</h2><p>Ask a question or get help with your next task.</p></section>
+        <div id="messages" class="messages" aria-live="polite" aria-label="Conversation messages"></div>
+        <div class="composer-dock">
+          <form id="message-form" class="composer"><label for="message" class="sr-only">Message AgentHub</label><textarea id="message" rows="1" maxlength="12000" placeholder="Ask AgentHub anything…" required></textarea><div class="composer-toolbar"><span class="composer-context"><svg><use href="#i-chat"/></svg>Chat<span class="context-separator">/</span><span>AgentHub</span></span><button id="send" class="send-button" type="submit" aria-label="Send message" disabled><svg><use href="#i-arrow"/></svg></button></div></form>
+          <div id="suggestions" class="suggestions"><button data-prompt="Help me draft a clear, friendly customer support reply. Ask me for the details you need."><svg><use href="#i-write"/></svg>Draft a reply</button><button data-prompt="Help me break a business task into a practical, step-by-step plan."><svg><use href="#i-compose"/></svg>Make a plan</button><button data-prompt="Help me think through an idea. Ask me a few useful questions to get started."><svg><use href="#i-spark"/></svg>Explore an idea</button></div>
+          <p id="notice" class="notice" role="alert" hidden></p>
+          <p id="composer-note" class="composer-note">A space to think, plan, and get things moving.</p>
+        </div>
+      </div>
+      <footer class="app-footer"><span><span class="connection-dot"></span><span id="connection-label">Local workspace</span></span><span>Enter to send <span class="footer-divider">·</span> Shift + Enter for a new line</span></footer>
+    </main>
+  </div>
+  <dialog id="login-panel" class="login-dialog" aria-labelledby="login-title"><button id="close-login" class="icon-button dialog-close" aria-label="Close sign in"><svg><use href="#i-close"/></svg></button><svg class="login-logo"><use href="#i-logo"/></svg><h2 id="login-title">Welcome to AgentHub</h2><p class="login-description">Sign in to save your conversations<br>and pick up where you left off.</p><form id="login-form"><label for="username">Username</label><input id="username" autocomplete="username" required value="developer"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required><p id="login-error" class="notice" role="alert" hidden></p><button id="login-submit" class="primary-button" type="submit">Continue <svg><use href="#i-chevron"/></svg></button></form><p class="login-footnote">Your team account. Your own workspace.</p></dialog>
 </body>
 </html>
