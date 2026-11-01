@@ -1,6 +1,8 @@
 # AgentHub Backend
 
-AgentHub is a University of Toronto ECE1779 team project. This repository currently implements the initial backend: authenticated conversations, durable message submission, PostgreSQL-backed jobs, and a separate worker that produces a fixed English reply.
+AgentHub is a University of Toronto ECE1779 team project. This repository implements authenticated conversations, durable message submission, PostgreSQL-backed jobs, and a separate worker with optional OpenAI text chat. The default fixed-reply mode requires no API key and makes no paid model requests.
+
+For this milestone's worker setup, model configuration, limits and verification, see [Worker baseline](docs/WORKER_BASELINE.md). A lightweight browser test client is available at `/`; the API documentation remains at `/docs`.
 
 **Start here to run or review the implemented backend.** See the [database reference](docs/BACKEND_DATABASE.md) for field definitions and the [documentation index](docs/README.md) for architecture and planning material. Chinese-language notes are kept under [developer documentation](docs/developer/zh-CN/README.md).
 
@@ -12,7 +14,7 @@ The [technology stack guide](docs/TECH_STACK.md) explains the current tools, ver
 
 The API and worker share a Python 3.13 image. PostgreSQL 17 stores users, conversations, messages and jobs on a persistent volume. Startup waits for database readiness, applies Alembic migrations, initializes the first account, then starts the API and worker.
 
-The worker responds with `Message received.`; it does not call a model API or perform business operations. Model integration, human approvals, SSE, simulated refunds, backups and production Swarm deployment remain planned work. The included GitHub Actions workflow builds and tests the containers; it does not publish images or deploy to a remote server.
+By default the worker responds with `Message received.`. Set `REPLY_MODE=openai` and configure a private API key to enable real model replies with bounded context, output and retries. It does not perform business operations. Human approvals, SSE, simulated refunds, backups and production Swarm deployment remain planned work. The included GitHub Actions workflow builds and tests the containers; it does not publish images or deploy to a remote server.
 
 ## Quick start
 
@@ -38,6 +40,7 @@ If host Python is unavailable, copy `.env.example` to `.env` and replace both pa
 After startup:
 
 - Health check: <http://127.0.0.1:8000/health>.
+- Browser test client: <http://127.0.0.1:8000/>.
 - Interactive API documentation: <http://127.0.0.1:8000/docs>.
 - `migrate` and `bootstrap` should exit with code 0; these are one-shot services.
 - `api` should be healthy and `worker` should remain running. PostgreSQL has no published host port.
@@ -178,7 +181,7 @@ docker compose run --rm test
 
 Tests use a separate `test-db` container and the disposable `agenthub_test` database, never the development `db`. Fixtures refuse database names without the `_test` suffix. The test database uses a temporary memory-backed mount and loses its data when stopped.
 
-Integration tests cover message submission, fixed replies, duplicate requests, ownership, concurrent claims, expired-claim recovery, stale-worker fencing and migrations. Short fixed replies do not require lease renewal; long-running-task renewal remains future work. Defaults are a 60-second lease and at most three claims after interruptions. Processing exceptions are recorded as failures.
+Integration tests cover message submission, model-provider contracts using stubbed HTTP, fixed replies, ordered conversation context, bounded retries, duplicate requests, ownership, concurrent claims, lease renewal, expired-claim recovery, stale-worker fencing and migrations. Defaults are a 60-second renewable lease and at most three claims. Transient model failures requeue with a delay; non-retryable processing exceptions are recorded as failures.
 
 Stop only the temporary test database, or start a second worker, with:
 

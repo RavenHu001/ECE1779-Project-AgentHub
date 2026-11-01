@@ -2,10 +2,13 @@
 # 提供经过身份验证的聊天接口；后台处理在独立容器运行。
 
 import logging
+import os
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -16,9 +19,15 @@ from app.schemas import ConversationCreate, ConversationOut, JobOut, MessageCrea
 from app.security import current_user
 
 app = FastAPI(
-    title="AgentHub Backend", version="0.1.0", description="Team development skeleton; fixed replies only."
+    title="AgentHub Backend", version="0.2.0", description="Durable chat jobs with optional model replies."
 )
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 log = logging.getLogger(__name__)
+
+
+@app.get("/", include_in_schema=False)
+def demo():
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
 # Return a safe English error without exposing database parameters.
@@ -35,7 +44,8 @@ def database_error(_request: Request, exc: SQLAlchemyError):
 def health():
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
-    return {"status": "ok", "database": "ok", "reply_mode": "fixed"}
+    # This is configured mode, not a claim that the worker/model is healthy.
+    return {"status": "ok", "database": "ok", "reply_mode": os.getenv("REPLY_MODE", "fixed")}
 
 
 # Return the authenticated account without its password hash.
