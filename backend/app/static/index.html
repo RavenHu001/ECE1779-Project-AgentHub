@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentHub · Worker demo</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/chat.js" defer></script>
+</head>
+<body>
+  <header><div><span class="mark">A</span><strong>AgentHub</strong></div><span id="mode">Connecting…</span></header>
+  <main>
+    <section id="login-panel" class="card login">
+      <p class="eyebrow">TEAM DEVELOPMENT</p><h1>Your workspace, ready for a conversation.</h1>
+      <p class="muted">Sign in with your local development account to try the worker and saved chat history.</p>
+      <form id="login-form">
+        <label>Username<input id="username" autocomplete="username" required value="developer"></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">Open workspace <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="muted small">Use the bootstrap credentials in your local .env file. Credentials stay in memory for this page session. Use HTTPS outside localhost.</p>
+    </section>
+    <section id="workspace" class="workspace" hidden>
+      <aside class="card"><div class="sidebar-heading"><strong>Conversations</strong><button id="new-chat" class="secondary">+ New</button></div><nav id="conversations" aria-label="Saved conversations"></nav><button id="sign-out" class="secondary">Sign out</button></aside>
+      <section class="card chat"><div class="chat-heading"><div><p class="eyebrow">WORKER BASELINE</p><h1 id="chat-title">New conversation</h1></div><span id="job-status" role="status">Ready</span></div>
+        <div id="messages" aria-live="polite"><p class="empty">Start with a question. Your messages and replies are saved.</p></div>
+        <form id="message-form"><label for="message">Message</label><textarea id="message" rows="3" maxlength="12000" placeholder="Ask AgentHub a question…" required></textarea><div class="composer-footer"><span class="muted small">Text chat only · Business actions are not enabled</span><button id="send" type="submit">Send message ↑</button></div></form>
+      </section>
+    </section>
+    <p id="notice" role="status"></p>
+  </main>
+</body>
+</html>
