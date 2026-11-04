@@ -40,6 +40,9 @@ class Claim:
 # Clear all ownership fields together to satisfy the job-state constraint.
 # 一起清空所有领取字段，满足待办状态约束。
 def clear_lease(job):
+    """Release all ownership fields as one state transition.
+    将全部领取字段作为一次状态变更清空，保持数据库状态约束成立。
+    """
     job.lease_owner = None
     job.lease_token = None
     job.lease_expires_at = None
@@ -48,6 +51,11 @@ def clear_lease(job):
 # Skip rows locked by other workers and reclaim expired attempts safely.
 # 跳过其他 worker 已锁定的记录，并安全接管过期工作。
 def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
+    """Atomically claim ready work without overtaking an unfinished conversation turn.
+    原子领取已就绪的任务，且不越过同一会话中尚未完成的较早消息。
+    """
+    # Match predecessors by source-message sequence, including retries not yet ready.
+    # 根据来源消息的顺序查找前置任务，尚未到重试时间的任务也会阻挡后续消息。
     earlier_job = aliased(Job)
     earlier_message = aliased(Message)
     pending_predecessor = (
@@ -61,6 +69,8 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
         .exists()
     )
     with SessionLocal.begin() as session:
+        # Use database time and skip locked jobs so replicas do not share one claim.
+        # 使用数据库时间并跳过已锁定任务，避免多个副本领取同一项工作。
         now = session.scalar(select(func.clock_timestamp()))
         job = session.scalar(
             select(Job)
@@ -79,12 +89,16 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
         if not job:
             return None
         if job.attempts >= max_attempts:
+            # Exhausted interrupted work must become terminal to unblock its successors.
+            # 中断后已耗尽领取次数的任务必须进入终态，后续消息才能继续处理。
             job.status = "FAILED"
             job.finished_at = now
             job.updated_at = now
             job.last_error = "Worker claim limit reached after interruption"
             clear_lease(job)
             return None
+        # Each attempt gets a fresh token; every later write must prove this ownership.
+        # 每次尝试使用新令牌；后续每一次写入都必须证明仍持有此次领取权。
         job.status = "RUNNING"
         job.attempts += 1
         job.started_at = job.started_at or now
@@ -98,6 +112,9 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
 # Use live database time so ownership is checked after any lock wait.
 # 使用数据库实时时间，确保锁等待之后仍重新判断领取权。
 def owned_job(claim):
+    """Build a fencing predicate using the current token and live lease expiry.
+    用当前令牌和实时租约到期时间构造写入条件，阻止旧 Worker 提交结果。
+    """
     return and_(
         Job.id == claim.job_id,
         Job.status == "RUNNING",
@@ -107,6 +124,9 @@ def owned_job(claim):
 
 
 def renew_lease(claim: Claim, lease_seconds=60):
+    """Extend an active claim in its own transaction, or report lost ownership.
+    在独立事务中延长有效租约；令牌过期或已更换时报告领取权丢失。
+    """
     with SessionLocal.begin() as session:
         changed = session.execute(
             update(Job)
@@ -122,11 +142,16 @@ def renew_lease(claim: Claim, lease_seconds=60):
 
 @contextmanager
 def maintain_lease(claim: Claim, lease_seconds):
-    """Renew in short independent transactions while the model request is in flight."""
+    """Keep ownership alive while generation runs without holding a database session.
+    生成回复期间通过短事务续租，避免在等待外部请求时长期占用数据库会话。
+    """
     stop = Event()
     lost = Event()
 
     def heartbeat():
+        """Renew every third of a lease and remember failures for the caller.
+        每经过三分之一租期续租一次，并记录失败以便主处理流程拒绝提交。
+        """
         while not stop.wait(lease_seconds / 3):
             try:
                 renew_lease(claim, lease_seconds)
@@ -134,6 +159,8 @@ def maintain_lease(claim: Claim, lease_seconds):
                 lost.set()
                 return
 
+    # Renewal uses a separate thread; the foreground request owns no long transaction.
+    # 独立线程负责续租，前台模型请求不持有长事务。
     thread = Thread(target=heartbeat, daemon=True)
     thread.start()
     try:
@@ -141,13 +168,19 @@ def maintain_lease(claim: Claim, lease_seconds):
         if lost.is_set():
             raise LostLease()
     finally:
+        # Always stop the heartbeat, including provider failures and cancellation paths.
+        # 无论模型失败还是处理异常，都要停止心跳，避免任务结束后继续续租。
         stop.set()
         thread.join(timeout=2)
 
 
 def load_context(claim: Claim, settings: ReplySettings):
-    """Bound both row count and characters; never include later queued user messages."""
+    """Load recent model input from this conversation within row and character limits.
+    只加载当前会话中不晚于来源消息的历史，并同时限制消息条数与总字符数。
+    """
     with SessionLocal() as session:
+        # Check ownership and the current message before spending work on history.
+        # 读取历史前先确认领取权和当前消息，超限的当前消息直接失败而不是截断。
         job = session.scalar(select(Job).where(owned_job(claim)))
         if not job:
             raise LostLease()
@@ -158,6 +191,7 @@ def load_context(claim: Claim, settings: ReplySettings):
             raise ValueError("Message exceeds model context character limit")
         # An earlier reply can have a greater seq than this queued source message.
         # Include replies by their originating user message instead of physical seq.
+        # 较早问题的回复可能晚于当前问题入库，因此按回复对应的问题顺序排列。
         origin = aliased(Message)
         rows = session.execute(
             select(Message, func.coalesce(origin.seq, Message.seq).label("turn_seq"))
@@ -169,6 +203,8 @@ def load_context(claim: Claim, settings: ReplySettings):
             .order_by(func.coalesce(origin.seq, Message.seq).desc(), Message.seq.desc())
             .limit(settings.context_messages)
         ).all()
+        # Keep a contiguous recent suffix, then reverse it into chronological turn order.
+        # 从最近消息起保留连续且未超限的历史，再反转为模型需要的问答时间顺序。
         remaining = settings.context_chars
         context = []
         for message, _turn in rows:
@@ -180,6 +216,9 @@ def load_context(claim: Claim, settings: ReplySettings):
 
 
 def retry_job(claim: Claim, *, max_attempts):
+    """Persist a bounded retry delay, or mark the final attempt as failed.
+    将有次数上限的重试延迟写入数据库；最后一次尝试失败时直接进入失败终态。
+    """
     with SessionLocal.begin() as session:
         job = session.scalar(select(Job).where(owned_job(claim)).with_for_update())
         if not job:
@@ -191,6 +230,8 @@ def retry_job(claim: Claim, *, max_attempts):
             job.finished_at = now
             job.last_error = "Model temporarily unavailable; retry limit reached"
         else:
+            # attempts includes the first claim; delay grows exponentially up to 30 s.
+            # attempts 包含首次领取；重试延迟按指数增长，但最多等待 30 秒。
             job.status = "QUEUED"
             job.available_at = now + timedelta(seconds=min(2**job.attempts, 30))
             job.last_error = "Model temporarily unavailable; retry scheduled"
@@ -200,6 +241,9 @@ def retry_job(claim: Claim, *, max_attempts):
 # Commit the reply and completion together, rechecking ownership before success.
 # 一起提交回复与完成状态，在标记成功前再次核对领取权。
 def complete_job(claim: Claim, reply: str):
+    """Commit one reply and job success together, fencing stale attempts twice.
+    在同一事务中提交唯一回复和成功状态，并在关键写入前后检查租约有效性。
+    """
     if not reply.strip():
         raise ValueError("Reply must not be blank")
     with SessionLocal.begin() as session:
@@ -209,6 +253,8 @@ def complete_job(claim: Claim, reply: str):
         source = session.get(Message, job.source_message_id)
         if not source or source.role != "user":
             raise ValueError("Job source must be a user message")
+        # Serialize sequence allocation against both incoming messages and other replies.
+        # 锁定会话后分配消息顺序号，避免与新用户消息或其他回复争用相同编号。
         conversation = session.scalar(
             select(Conversation).where(Conversation.id == source.conversation_id).with_for_update()
         )
@@ -224,6 +270,8 @@ def complete_job(claim: Claim, reply: str):
         conversation.next_message_seq += 1
         conversation.updated_at = func.clock_timestamp()
         session.flush()
+        # Recheck live time after possible lock waits; failure rolls back the entire reply.
+        # 锁等待后再次按实时时间校验；失去领取权时，整条回复及顺序号都会回滚。
         changed = session.execute(
             update(Job)
             .where(owned_job(claim))
@@ -247,6 +295,9 @@ def complete_job(claim: Claim, reply: str):
 # Record a sanitized failure only while this worker still owns the job.
 # 仅在仍持有领取权时记录经过简化的错误。
 def fail_job(claim: Claim, error: Exception):
+    """Record only an exception type, and only while this attempt still owns the job.
+    只在仍持有领取权时记录异常类型，避免保存可能含密钥或提供商正文的异常信息。
+    """
     with SessionLocal.begin() as session:
         session.execute(
             update(Job)
@@ -274,6 +325,9 @@ def run_once(
     provider=None,
     settings=None,
 ) -> bool:
+    """Process one claim; fixed replies do not read or validate model context.
+    每次处理一个领取；固定回复不读取模型上下文，也不受模型输入限额影响。
+    """
     claim = claim_job(owner, lease_seconds, max_attempts)
     if not claim:
         return False
@@ -281,11 +335,15 @@ def run_once(
     settings = settings or ReplySettings()
     try:
         with maintain_lease(claim, lease_seconds):
-            context = load_context(claim, settings)
+            # Fixed replies ignore history and must preserve the API's 20,000-character limit.
+            # 固定回复无需历史，必须保留 API 原有的 20,000 字符接收能力。
+            context = [] if provider.mode == "fixed" else load_context(claim, settings)
             generated = provider.generate(context)
         complete_job(claim, generated)
         log.info("job=%s completed mode=%s", claim.job_id, provider.mode)
     except RetryableReplyError:
+        # The queue owns retries; a lost lease must not requeue somebody else's attempt.
+        # 重试由数据库队列管理；领取权丢失后不能改写其他 Worker 已接管的任务。
         try:
             retry_job(claim, max_attempts=max_attempts)
         except LostLease:
@@ -302,6 +360,9 @@ def run_once(
 # Poll for work and finish the current bounded operation before shutdown.
 # 轮询待办，并在结束当前短操作后退出。
 def main():
+    """Validate settings once, then poll until shutdown after the current operation.
+    启动时校验配置，随后持续轮询；收到退出信号后完成当前操作再结束进程。
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     poll = positive_number("WORKER_POLL_SECONDS", "1")
     lease = positive_number("WORKER_LEASE_SECONDS", "60")
@@ -316,6 +377,9 @@ def main():
     # Request graceful shutdown instead of interrupting the completion transaction.
     # 请求平稳退出，不直接中断正在提交的事务。
     def stop(_signum, _frame):
+        """Request shutdown without interrupting an in-progress database commit.
+        只设置停止标志，避免中断正在进行的数据库提交。
+        """
         nonlocal stopping
         stopping = True
 
@@ -323,6 +387,8 @@ def main():
     signal.signal(signal.SIGINT, stop)
     log.info("worker=%s started mode=%s", owner, provider.mode)
     while not stopping:
+        # Idle or unavailable databases back off; completed work immediately frees the loop.
+        # 无任务或数据库不可用时等待轮询间隔；处理完任务后立即尝试下一项。
         try:
             worked = run_once(
                 owner, lease_seconds=lease, max_attempts=attempts, provider=provider, settings=settings

@@ -24,6 +24,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # Node is a test-only dependency; the runtime image continues to serve static assets directly.
+      # Node 只用于测试；运行镜像仍由 API 直接提供静态资源。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Browser client state regressions
+        # Exercise Unicode titles, uncertain retries, account cleanup, and stale history responses.
+        # 验证 Unicode 标题、待确认重试、账号退出清理以及过期历史响应。
+        run: node --test backend/tests/test_chat_client.cjs
       - name: Generate isolated configuration
         run: python scripts/init_env.py --project-name agenthub-ci
       - name: Validate Compose

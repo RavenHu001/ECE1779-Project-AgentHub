@@ -179,6 +179,14 @@ docker compose run --rm --no-deps test sh -c "ruff check . && ruff format --chec
 docker compose run --rm test
 ```
 
+Run browser state regressions with Node.js 22 or newer on the host:
+
+```bash
+node --test backend/tests/test_chat_client.cjs
+```
+
+These offline tests cover generated Unicode titles, retry identifiers across chat navigation, private draft cleanup on sign-out, and overlapping history requests. Node is used only for testing; the application needs no Node runtime.
+
 Tests use a separate `test-db` container and the disposable `agenthub_test` database, never the development `db`. Fixtures refuse database names without the `_test` suffix. The test database uses a temporary memory-backed mount and loses its data when stopped.
 
 Integration tests cover message submission, model-provider contracts using stubbed HTTP, fixed replies, ordered conversation context, bounded retries, duplicate requests, ownership, concurrent claims, lease renewal, expired-claim recovery, stale-worker fencing and migrations. Defaults are a 60-second renewable lease and at most three claims. Transient model failures requeue with a delay; non-retryable processing exceptions are recorded as failures.

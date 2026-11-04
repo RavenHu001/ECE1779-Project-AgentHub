@@ -30,7 +30,7 @@ MODEL_CONTEXT_CHARS=12000
 
 Then run `docker compose up -d --build --wait` to recreate the configured services. Never paste a key in chat, commit it, or print resolved Compose configuration in a shared log. The key is passed only to the worker container. Setting `openai` mode without a key fails worker startup; it does not silently switch to a simulated answer.
 
-The configured model must support the Responses API and `reasoning.effort=none`. Model selection stays configurable. Context has both a message-count limit and a character limit. An individual message exceeding the context character limit fails explicitly rather than silently truncating the request. The model sees the current message and recent earlier turns from that conversation only. No business tools, refunds, approvals, SSE or token streaming are implemented at this milestone. The system prompt explicitly forbids claiming business actions were performed.
+The configured model must support the Responses API and `reasoning.effort=none`. Model selection stays configurable. In model mode, context has both a message-count limit and a character limit. An individual message exceeding the context character limit fails explicitly rather than silently truncating the request. Fixed mode does not load model context and preserves the API's 20,000-character message limit. The browser composer retains its 12,000-character limit for compatibility with the default model settings. The model sees the current message and recent earlier turns from that conversation only. No business tools, refunds, approvals, SSE or token streaming are implemented at this milestone. The system prompt explicitly forbids claiming business actions were performed.
 
 These controls reduce spending but are **not a dollar-denominated spending cap**. Use the API account's billing controls as well. Do not run large workloads before reviewing usage. Recovered attempts may repeat a paid model request, although only the current claim can save its reply.
 
@@ -47,6 +47,14 @@ These controls reduce spending but are **not a dollar-denominated spending cap**
 
 ## Verification
 
+Run browser state regressions on the host with Node.js 22 or newer; Node is needed only for these tests, not to run the application:
+
+```bash
+node --test backend/tests/test_chat_client.cjs
+```
+
+These tests execute the real client script with an in-memory DOM and controllable HTTP responses. They cover Unicode-safe generated titles, retaining drafts and submission keys across navigation, clearing private drafts on sign-out, and ignoring superseded history reads and errors. They do not replace visual and keyboard checks in a real browser. CI runs them before the container checks.
+
 ```bash
 docker compose --profile test build test
 docker compose run --rm --no-deps test sh -c 'ruff check . && ruff format --check .'
@@ -54,7 +62,7 @@ docker compose run --rm test
 docker compose exec -T api python -m app.smoke
 ```
 
-Tests use the existing isolated PostgreSQL test service. Added coverage exercises ordered context for queued messages, conversation isolation and limits, slow model calls with lease renewal, stale renewal rejection, persisted retry exhaustion, error redaction, and the actual SDK request/response contract through an in-memory HTTP transport. No API key or paid requests are required for CI.
+Tests use the existing isolated PostgreSQL test service. Added coverage exercises fixed replies across the full API message limit, ordered context for queued messages, conversation isolation and limits, slow model calls with lease renewal, stale renewal rejection, persisted retry exhaustion, error redaction, and the actual SDK request/response contract through an in-memory HTTP transport. No API key or paid requests are required for CI.
 
 To exercise replication, start `docker compose up -d --scale worker=2 --wait` and repeat the smoke check. To verify persistence, record the conversation UUID printed by the smoke check, recreate containers without deleting volumes, and use `python -m app.smoke --verify-conversation UUID` inside the API container.
 

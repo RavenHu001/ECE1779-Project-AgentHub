@@ -76,6 +76,8 @@ services:
   # 在 HTTP 请求之外独立处理后台工作。
   worker:
     <<: *backend
+    # Only the worker receives the private model key and per-request model limits.
+    # 只有 Worker 接收私有模型密钥和单次模型请求限额。
     environment:
       <<: *backend-env
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -88,6 +90,8 @@ services:
     depends_on:
       bootstrap:
         condition: service_completed_successfully
+    # Allow an in-flight bounded request to finish before the container is forcibly stopped.
+    # 在强制停止容器之前，为正在进行的模型请求留出完成和提交结果的宽限时间。
     stop_grace_period: 45s
     restart: unless-stopped
 
