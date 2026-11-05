@@ -1,6 +1,6 @@
 # Current Backend Technology Stack
 
-The implemented backend uses **Python, FastAPI, PostgreSQL and Docker Compose**. It accepts authenticated messages, saves durable jobs and produces a fixed English reply through a separate worker. The selection rationale below explains how each technology fits this initial implementation.
+The implemented backend uses **Python, FastAPI, PostgreSQL and Docker Compose**. It accepts authenticated messages, saves durable jobs and produces fixed or optional OpenAI model replies through a separate worker. See [Worker baseline](WORKER_BASELINE.md) for the latest execution behavior and model configuration.
 
 For source responsibilities, see the [code structure guide](CODE_STRUCTURE.md). For startup commands, see the [team guide](../README.md). A [Chinese version](developer/zh-CN/TECH_STACK.md) is available for developers.
 
@@ -29,7 +29,7 @@ The relevant files are [main.py](../backend/app/main.py), [schemas.py](../backen
 | HTTP Basic | Authenticates development accounts on API requests | Works with Swagger UI and Postman and supports individual accounts before a full login/session flow is built. Use SSH tunneling or HTTPS; Basic authentication does not encrypt credentials |
 | scrypt with random salts | Hashes account passwords through Python's standard library | Stores password hashes rather than plaintext and avoids an additional hashing package in this initial image |
 
-The worker currently produces `Message received.`. Long-running lease renewal and external business actions are not implemented. HTTP Basic is the current development mechanism; it is not a commitment to the final login design.
+The worker defaults to `Message received.` with no model calls. Opt-in model mode uses the OpenAI Python SDK and Responses API with bounded context, output and retries. Leases renew while a model request is running. External business actions are not implemented. HTTP Basic is the current development mechanism; it is not a commitment to the final login design.
 
 See [worker.py](../backend/app/worker.py), [security.py](../backend/app/security.py) and [manage.py](../backend/app/manage.py).
 
@@ -78,6 +78,6 @@ The package versions above come from the committed [runtime requirements](../bac
 
 Supporting transitive packages are also locked in those files. Installing a package as a dependency does not mean every feature it offers is configured; for example, the presence of an OpenTelemetry dependency is not an implemented tracing system.
 
-React, model APIs, approval workflows, SSE, simulated business services, production Swarm deployment, provider monitoring and automated backups remain planned work. There is no current Redis, Celery or separate message broker service. See the [architecture handover](AGENTHUB_TEAM_HANDOVER.md) for the broader proposal.
+React, approval workflows, SSE, simulated business services, production Swarm deployment, provider monitoring and automated backups remain planned work. A plain HTML/JavaScript development client exercises the existing API. There is no current Redis, Celery or separate message broker service. See the [architecture handover](AGENTHUB_TEAM_HANDOVER.md) for the broader proposal.
 
 Official references: [FastAPI features](https://fastapi.tiangolo.com/features/), [SQLAlchemy sessions](https://docs.sqlalchemy.org/en/20/orm/session_basics.html), and [Docker Compose application model](https://docs.docker.com/compose/intro/compose-application-model/).

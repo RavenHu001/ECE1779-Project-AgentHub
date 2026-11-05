@@ -2,10 +2,13 @@
 # 提供经过身份验证的聊天接口；后台处理在独立容器运行。
 
 import logging
+import os
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -16,15 +19,27 @@ from app.schemas import ConversationCreate, ConversationOut, JobOut, MessageCrea
 from app.security import current_user
 
 app = FastAPI(
-    title="AgentHub Backend", version="0.1.0", description="Team development skeleton; fixed replies only."
+    title="AgentHub Backend", version="0.2.0", description="Durable chat jobs with optional model replies."
 )
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 log = logging.getLogger(__name__)
+
+
+@app.get("/", include_in_schema=False)
+def demo():
+    """Serve the public development client; business requests still require authentication.
+    提供公开的开发用聊天页面；页面发出的业务请求仍需通过身份认证。
+    """
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
 # Return a safe English error without exposing database parameters.
 # 返回安全的英文错误，不公开数据库参数。
 @app.exception_handler(SQLAlchemyError)
 def database_error(_request: Request, exc: SQLAlchemyError):
+    """Expose a retryable database outage without serializing SQL or connection details.
+    返回可稍后重试的数据库不可用响应，不公开 SQL 参数或数据库连接详情。
+    """
     log.error("Database operation failed: %s", type(exc).__name__)
     return JSONResponse(status_code=503, content={"detail": "Database temporarily unavailable"})
 
@@ -33,15 +48,23 @@ def database_error(_request: Request, exc: SQLAlchemyError):
 # 无需用户账号即可检查数据库连通性。
 @app.get("/health", description="Check API and database availability. Authentication is not required.")
 def health():
+    """Probe database connectivity and report configured mode without calling a model.
+    探测数据库连接并报告配置的回复模式，此接口不调用模型或验证 Worker 心跳。
+    """
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
-    return {"status": "ok", "database": "ok", "reply_mode": "fixed"}
+    # This is configured mode, not a claim that the worker/model is healthy.
+    # 此字段仅代表配置值，不表示 Worker 或模型服务已通过可用性验证。
+    return {"status": "ok", "database": "ok", "reply_mode": os.getenv("REPLY_MODE", "fixed")}
 
 
 # Return the authenticated account without its password hash.
 # 返回已验证账号的信息，不返回密码哈希。
 @app.get("/me", description="Return the authenticated account without password or credential fields.")
 def me(user: User = Depends(current_user)):
+    """Return only the authenticated account's public identity fields.
+    仅返回已验证账号的公开身份字段，不包含密码哈希或其他认证信息。
+    """
     return {"id": user.id, "username": user.username, "display_name": user.display_name}
 
 
@@ -56,6 +79,9 @@ def me(user: User = Depends(current_user)):
 def create_conversation(
     payload: ConversationCreate, user: User = Depends(current_user), session: Session = Depends(get_session)
 ):
+    """Create a conversation owned by the authenticated user in one short transaction.
+    在短事务中创建属于已验证用户的会话，所有权由认证结果确定。
+    """
     with session.begin():
         conversation = Conversation(user_id=user.id, title=payload.title)
         session.add(conversation)
@@ -75,6 +101,9 @@ def list_conversations(
     user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
+    """Return a bounded account-scoped list, newest activity first with deterministic ties.
+    返回数量受限且仅属于当前账号的会话，按最近活动排序并用编号稳定处理并列情况。
+    """
     return session.scalars(
         select(Conversation)
         .where(Conversation.user_id == user.id)
@@ -97,7 +126,12 @@ def submit_message(
     user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
+    """Atomically save one logical message and job, returning stable IDs for identical retries.
+    原子保存一条逻辑消息及其任务；相同内容和去重标识的重试始终返回原有编号。
+    """
     with session.begin():
+        # Ownership and sequence allocation share a row lock with worker completion.
+        # 检查会话归属并锁定会话，与 Worker 保存回复时共同保护消息顺序号的分配。
         conversation = session.scalar(
             select(Conversation)
             .where(Conversation.id == conversation_id, Conversation.user_id == user.id)
@@ -105,6 +139,8 @@ def submit_message(
         )
         if not conversation:
             raise HTTPException(404, "Conversation not found")
+        # A retry must reuse both key and text; a key cannot silently change an accepted message.
+        # 重试必须同时复用标识和原文，不能借用已有标识静默修改已接受的消息。
         existing = session.scalar(
             select(Message).where(
                 Message.conversation_id == conversation_id, Message.submission_key == payload.submission_key
@@ -115,6 +151,8 @@ def submit_message(
                 raise HTTPException(409, "submission_key already used for different content")
             job_id = session.scalar(select(Job.id).where(Job.source_message_id == existing.id))
             return SubmissionOut(message_id=existing.id, job_id=job_id)
+        # Allocate the sequence and persist the message before creating its foreign-keyed job.
+        # 分配顺序号并保存消息，再创建通过外键引用它的任务；任一步失败都会整体回滚。
         message = Message(
             conversation_id=conversation_id,
             role="user",
@@ -147,11 +185,16 @@ def list_messages(
     user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
+    """Check ownership before reading ordered pages after an exclusive sequence cursor.
+    先确认会话属于当前账号，再分页读取顺序号严格大于游标的消息。
+    """
     conversation = session.scalar(
         select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user.id)
     )
     if not conversation:
         raise HTTPException(404, "Conversation not found")
+    # Sequence pagination lets clients read complete history without one unbounded query.
+    # 顺序号分页允许客户端读取完整历史，同时避免一次无上限查询返回过多记录。
     return session.scalars(
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.seq > after_seq)
@@ -168,6 +211,9 @@ def list_messages(
     description="Read the processing status of a job belonging to your account.",
 )
 def get_job(job_id: UUID, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """Resolve job ownership through its source message and expose the public job schema.
+    通过来源消息和会话确认任务归属，再由公开响应模型过滤掉领取令牌等内部字段。
+    """
     job = session.scalar(
         select(Job)
         .join(Message, Job.source_message_id == Message.id)

@@ -1,6 +1,6 @@
 # Backend Code Structure
 
-The current backend accepts authenticated chat messages, saves them in PostgreSQL, and uses a separate worker to produce `Message received.`. This guide explains where that behavior lives. For startup commands, use the [team guide](../README.md); for verification steps, use the [manual testing guide](MANUAL_TESTING.md).
+The current backend accepts authenticated chat messages, saves them in PostgreSQL, and uses a separate worker to produce a fixed reply or an optional model-generated answer. This guide explains where that behavior lives. For the latest model settings, limits and startup options, use [Worker baseline](WORKER_BASELINE.md); for general startup commands, use the [team guide](../README.md).
 
 ## Repository map
 
@@ -60,7 +60,9 @@ All paths below are under `backend/app/`.
 | `schemas.py` | Defines accepted request fields and returned response fields; validates input with Pydantic |
 | `security.py` | Verifies HTTP Basic credentials, salted scrypt hashes and account activation |
 | `main.py` | Defines HTTP endpoints, checks ownership and coordinates database operations |
-| `worker.py` | Claims jobs, saves fixed replies, records failures and handles expired ownership |
+| `worker.py` | Claims ordered jobs, loads context, renews leases, saves replies, retries transient errors and handles expired ownership |
+| `replies.py` | Provides fixed responses or bounded OpenAI Responses API text chat |
+| `static/` | Serves the lightweight browser development client through the API |
 | `manage.py` | Implements bootstrap, account creation and password-change commands |
 | `smoke.py` | Calls the running API and waits for the independent worker to verify the complete path |
 
@@ -81,10 +83,10 @@ flowchart LR
 2. `main.py` checks conversation ownership, locks the conversation and allocates a message sequence number.
 3. One transaction saves the user message, advances the sequence counter and creates a queued job. The API returns the message and job IDs.
 4. `worker.py` claims a job using a row lock that skips work held by other workers. It assigns a fresh ownership token and an expiry time.
-5. The worker generates the fixed reply. One transaction saves it, advances the sequence and marks the job successful, conditional on the claim still being valid.
+5. The worker loads bounded conversation context and generates a fixed or model reply. One transaction saves it, advances the sequence and marks the job successful, conditional on the claim still being valid.
 6. The client queries message history or job status through the API.
 
-`messages` stores what was said; `jobs` stores processing state. Reusing a submission key with identical text returns the original IDs; changing the text returns `409`. Expired claims can be recovered, and an old token cannot complete a job after ownership changes. Long-running lease renewal is not implemented in this milestone.
+`messages` stores what was said; `jobs` stores processing state. Reusing a submission key with identical text returns the original IDs; changing the text returns `409`. Expired claims can be recovered, and an old token cannot complete a job after ownership changes. A background heartbeat renews the lease during model calls; database sessions are closed between checkpoints and renewals.
 
 ## Database migrations
 
@@ -139,6 +141,6 @@ Integration tests exercise controlled success and failure conditions. `smoke.py`
 | Change startup, ports or service configuration | `compose.yaml` and `.env.example` |
 | Change credentials or account management | `security.py` or `manage.py` |
 
-Keep runtime messages English and source comments bilingual. The current repository has no frontend implementation, model calls, approval workflow, SSE or simulated business service; those remain planned work.
+Keep runtime messages English and source comments bilingual. A browser development client and optional model calls are available. The team's main frontend, approval workflow, SSE and simulated business service remain planned work.
 
 A useful reading order is `compose.yaml` → `schemas.py` → `models.py` → `main.py` → `worker.py` → migrations → tests.

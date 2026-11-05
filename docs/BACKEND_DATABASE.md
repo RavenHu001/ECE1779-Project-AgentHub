@@ -98,7 +98,7 @@ An index on `(status, available_at, created_at)` supports ready-work selection. 
 2. A worker locks a claimable row using `FOR UPDATE SKIP LOCKED`, increments attempts and assigns a new lease token. Expired running work can be reclaimed, subject to the configured attempt limit.
 3. The worker saves the final reply, advances the conversation counter and marks the job successful in one transaction. A live-time ownership check is repeated before completion; failure rolls back the reply and sequence change as well.
 
-The normal path is `QUEUED → RUNNING → SUCCEEDED`. Processing exceptions become `FAILED`. Interrupted work can be reclaimed after lease expiry; the defaults are 60 seconds and at most three claims. Long-running lease renewal is not implemented for the fixed-reply milestone.
+The normal path is `QUEUED → RUNNING → SUCCEEDED`. Non-retryable processing exceptions become `FAILED`. Transient model failures requeue with a bounded delay. Interrupted work can be reclaimed after lease expiry; the defaults are a renewable 60-second lease and at most three claims. The worker serializes pending jobs within each conversation. These worker-baseline changes reuse the same four tables and constraints; see [Worker baseline](WORKER_BASELINE.md).
 
 These guarantees apply to database chat writes. They are not a claim of exactly-once external refunds or business actions, which are not implemented yet.
 
