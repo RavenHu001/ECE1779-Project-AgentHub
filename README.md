@@ -2,6 +2,8 @@
 
 AgentHub is a University of Toronto ECE1779 team project. This repository implements authenticated conversations, durable message submission, PostgreSQL-backed jobs, and a separate worker with optional OpenAI text chat. The default fixed-reply mode requires no API key and makes no paid model requests.
 
+For a fresh checkout or Codex session, start with the [development handoff](docs/DEVELOPMENT_HANDOFF.md).
+
 For this milestone's worker setup, model configuration, limits and verification, see [Worker baseline](docs/WORKER_BASELINE.md). A lightweight browser test client is available at `/`; the API documentation remains at `/docs`.
 
 **Start here to run or review the implemented backend.** See the [database reference](docs/BACKEND_DATABASE.md) for field definitions and the [documentation index](docs/README.md) for architecture and planning material. Chinese-language notes are kept under [developer documentation](docs/developer/zh-CN/README.md).
