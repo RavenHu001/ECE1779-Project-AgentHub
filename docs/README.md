@@ -4,6 +4,7 @@ The [repository README](../README.md) is the English entry point for reviewers a
 
 | Document | Purpose and status |
 | --- | --- |
+| [Development handoff](DEVELOPMENT_HANDOFF.md) | Fresh-machine setup, merged baseline, regression guarantees and next work |
 | [Setup and team workflow](../README.md) | Current Docker services, accounts, shared access, API examples, tests and migration workflow |
 | [Code structure](CODE_STRUCTURE.md) | A concise map of services, source modules, migrations, tests and the message flow |
 | [Technology stack](TECH_STACK.md) | Current languages, libraries, versions, responsibilities and selection rationale |
