@@ -88,4 +88,6 @@ The next milestone is a read-only refund eligibility check for a simulated order
 
 Use Docker Compose with fixed reply mode and the isolated PostgreSQL test database. Cover the exact 30-day boundary, ordinary chat, submission retries and worker lease expiry. A repeated submission or a replacement worker should leave one saved result and one reply for the source message. Verify that reopening the conversation displays the saved reply.
 
+See the [developer implementation guide](developer/zh-CN/AGENTHUB_READ_ONLY_REFUND_CHECK.md) for the proposed data fields, request flow, worker transaction and tests.
+
 Ticket lookup, approval and simulated business writes follow this milestone. Use the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md) when designing the tool results, checkpoints, and approval and resume contracts for that work.
