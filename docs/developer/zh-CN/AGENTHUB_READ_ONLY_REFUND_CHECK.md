@@ -1,6 +1,6 @@
 # AgentHub 只读订单与退款资格检查开发说明
 
-本阶段的验收是用现有聊天界面提交一条检查请求，让 worker 查询模拟订单、计算退款资格、保存结构化结论，并通过聊天历史显示结果。开发范围以订单资格检查为止。工单关联、审批和模拟处置由后续阶段接入。以下数据结构和入口是本阶段的实现建议。 [里程碑说明](../../WORKER_BASELINE.md#next-execution-milestone)
+本阶段通过现有聊天界面提交一条检查请求，让 worker 查询模拟订单、计算退款资格、保存结构化结论，并通过聊天历史显示结果。工单关联、审批和模拟处置由后续阶段接入。 [演示说明](../../WORKER_BASELINE.md#read-only-refund-check)
 
 ## 请求如何流转
 
@@ -13,7 +13,7 @@ flowchart LR
 ```
 
 1. 前端通过 `POST /conversations/{id}/messages` 提交消息。API 已经会在一个事务内写入消息与 `PROCESS_MESSAGE` 待办，并返回 `202`、`message_id` 和 `job_id`。同一会话内用相同的 `submission_key` 和原文重发，会得到原来的两个 ID。 [消息提交实现](../../../backend/app/main.py)
-2. worker 沿用 `claim_job()` 领取待办。首版建议在 `REPLY_MODE=fixed` 下支持两条完整的演示句式，`Can order 1001 be refunded?` 和 `订单 1001 能退款吗？`。对来源消息去除首尾空白后匹配整句，只提取处于 PostgreSQL `BIGINT` 正值范围内的 ASCII 数字订单号。其余消息继续走当前回复流程。 [Worker 入口](../../../backend/app/worker.py)
+2. worker 沿用 `claim_job()` 领取待办。在 `REPLY_MODE=fixed` 下支持两条完整的演示句式，`Can order 1001 be refunded?` 和 `订单 1001 能退款吗？`。对来源消息去除首尾空白后匹配整句，只提取处于 PostgreSQL `BIGINT` 正值范围内的 ASCII 数字订单号。其余消息继续走当前回复流程。 [Worker 入口](../../../backend/app/worker.py)
 3. 前端继续轮询 `GET /jobs/{job_id}`，再用 `GET /conversations/{id}/messages` 读取回复。系统生成英文文本，例如 `Order 1001 is eligible for a simulated refund of CAD 129.99.`。订单原始资料和内部检查字段留在后端，用户看到结论与原因。 [查询接口](../../../backend/app/main.py)
 
 ## PostgreSQL 数据结构
@@ -27,7 +27,7 @@ flowchart LR
 | `jobs`（已有） | `source_message_id` 关联用户消息，`status` 表示处理状态，领取令牌和过期时间约束 worker 写入。 |
 | `messages`（已有） | 保存用户原文和最终回复。回复通过唯一的 `reply_to_message_id` 关联来源消息，通过会话内 `seq` 排序。 |
 
-在 `backend/app/models.py` 添加模型，并在当前 Alembic head `0002_english_defaults` 之后添加新 revision。迁移只建结构。演示数据在账号已创建后，通过 `app.manage` 的显式初始化命令写入。命令应按账号查找 UUID，在同一事务写入四笔订单。重复初始化时保留已有记录的归属、金额和交付时间，发现编号与归属冲突时报错。测试 fixture 使用自己的账号与订单。 [现有模型](../../../backend/app/models.py) · [迁移](../../../backend/migrations/versions/0002_english_defaults.py) · [管理命令](../../../backend/app/manage.py)
+迁移 `0003_read_only_refund_check` 在 `0002_english_defaults` 之后创建这两张表。账号创建后，运行 `docker compose run --rm admin seed-demo-orders alice bob` 写入四笔订单。命令按账号查找 UUID，在同一事务写入。重复初始化时保留已有记录的归属、金额和交付时间，发现编号与归属冲突时报错。测试 fixture 使用隔离数据库里的账号与订单。 [模型](../../../backend/app/models.py) · [迁移](../../../backend/migrations/versions/0003_read_only_refund_check.py) · [管理命令](../../../backend/app/manage.py)
 
 ## 权限与退款规则
 
@@ -46,7 +46,7 @@ worker 按 `job → source message → conversation.user_id` 取得当前用户�
 
 ## Worker 完成事务
 
-把确定性的资格判断放在独立业务模块，例如 `backend/app/refund_eligibility.py`。worker 识别订单请求后，把订单号传给业务分支。业务分支与普通回复共用现有的完成事务逻辑。 [Worker 完成实现](../../../backend/app/worker.py)
+固定模式在完成事务内识别来源消息中的订单请求，然后调用业务模块计算资格。业务分支与普通回复共用现有的完成事务逻辑。 [资格判断](../../../backend/app/refund_eligibility.py) · [Worker 完成实现](../../../backend/app/worker.py)
 
 1. 按现有 `complete_job()` 的顺序锁定 job 和会话，检查 job 仍是 `RUNNING`、领取令牌匹配且租约有效。
 2. 在事务内读取该会话用户的订单，计算并加入一条 execution，再按现有会话顺序写入一条英文助手回复。

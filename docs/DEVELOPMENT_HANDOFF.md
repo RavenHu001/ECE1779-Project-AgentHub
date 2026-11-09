@@ -34,7 +34,7 @@ docker compose exec -T api python -m app.smoke
 
 Open the [chat workspace](http://127.0.0.1:8000/) and sign in with `BOOTSTRAP_USERNAME` and `BOOTSTRAP_PASSWORD` from your ignored `.env`. The default username is `developer`. A new clone gets fresh local credentials and a fresh database. If a Codex browser permission prevents automatic opening, open the URL manually. The [API docs](http://127.0.0.1:8000/docs) and [health endpoint](http://127.0.0.1:8000/health) are also available. Adjust the URLs if you changed `API_PORT`.
 
-Use `REPLY_MODE=fixed` for ordinary development. A successful message receives `Message received.` with no model charges. For a live model check, configure the key privately in `.env` and use the [model setup guide](WORKER_BASELINE.md#enable-live-model-chat). The worker uses the OpenAI Responses API with bounded input, output, timeouts and retry attempts. Live access and billing depend on the account supplying the key.
+Use `REPLY_MODE=fixed` for ordinary development. An ordinary chat message receives `Message received.` with no model charges. For a live model check, configure the key privately in `.env` and use the [model setup guide](WORKER_BASELINE.md#enable-live-model-chat). The worker uses the OpenAI Responses API with bounded input, output, timeouts and retry attempts. Live access and billing depend on the account supplying the key.
 
 The `migrate` and `bootstrap` services exit successfully after startup. Use `docker compose ps -a` and `docker compose logs --tail 100 api worker migrate bootstrap` to diagnose failures. Rebuild after source changes because Compose runs code copied into the images. Ordinary `docker compose down` preserves the PostgreSQL volume. The `-v` option deletes it.
 
@@ -46,7 +46,7 @@ AgentHub is a University of Toronto ECE1779 team project for small-business supp
 | --- | --- |
 | Browser workspace | [Static assets](../backend/app/static/) served by FastAPI. The client renders chat, signs in, polls job status and retrieves history. |
 | API | [main.py](../backend/app/main.py) and [schemas.py](../backend/app/schemas.py). Authenticate and scope access, accept messages, expose saved conversations and job status. |
-| PostgreSQL | [models.py](../backend/app/models.py) and [Alembic revisions](../backend/migrations/versions/). Store users, conversations, messages and jobs. |
+| PostgreSQL | [models.py](../backend/app/models.py) and [Alembic revisions](../backend/migrations/versions/). Store users, conversations, messages, jobs, demo orders and eligibility results. |
 | Independent worker | [worker.py](../backend/app/worker.py). Claim jobs, renew leases, retry transient failures and commit replies. |
 | Reply providers | [replies.py](../backend/app/replies.py). Fixed acknowledgements or optional OpenAI text generation. |
 | Runtime and CI | [Compose](../compose.yaml) runs API, worker, PostgreSQL, migration and bootstrap services. [GitHub Actions](../.github/workflows/ci.yml) tests the project. |
@@ -79,9 +79,9 @@ To verify persistence, save the conversation UUID printed by the smoke check, re
 
 The proposed course demo is a single support and refund triage workflow with synthetic tickets and orders. The agent gathers facts, checks eligibility and prepares a resolution. Applying a simulated business change requires human approval of the specific proposal.
 
-The [next execution milestone](WORKER_BASELINE.md#next-execution-milestone) is a read-only check of refund eligibility for one simulated order. It defines the data, worker integration and acceptance cases for the first business task. Ticket lookup and approved resolutions follow the order check.
+The [read-only refund check](WORKER_BASELINE.md#read-only-refund-check) evaluates one simulated order and persists the conclusion alongside the chat reply. Ticket lookup and approved resolutions follow the order check.
 
-Business tools, approval, SSE, cloud orchestration, deployment monitoring and automated backups remain planned. The [original architecture handover](AGENTHUB_TEAM_HANDOVER.md) explains the rationale and alternatives. Its React and cloud diagrams describe proposals. Use current code and team decisions to resolve differences.
+Ticket lookup, approval, SSE, cloud orchestration, deployment monitoring and automated backups remain planned. The [original architecture handover](AGENTHUB_TEAM_HANDOVER.md) explains the rationale and alternatives. Its React and cloud diagrams describe proposals. Use current code and team decisions to resolve differences.
 
 For a fresh Codex chat, a useful starting prompt is:
 

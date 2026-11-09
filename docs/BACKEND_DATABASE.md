@@ -1,6 +1,6 @@
-# Initial Backend Database
+# Backend Database
 
-The running backend uses one PostgreSQL database with four application tables. API and worker processes share it; they coordinate through durable jobs rather than in-memory state. Alembic also maintains its own `alembic_version` bookkeeping table.
+The API and worker share one PostgreSQL database and coordinate through durable jobs. The four chat tables below are joined by `orders` and `executions` for the read-only refund check. Alembic tracks applied revisions in `alembic_version`.
 
 ```mermaid
 erDiagram
@@ -14,7 +14,7 @@ Every conversation has one account owner. User messages create processing jobs; 
 
 ## Shared conventions
 
-- IDs and foreign-key IDs use `UUID`. Application code generates IDs.
+- Application record IDs and foreign keys use `UUID`. Simulated order numbers use positive `BIGINT` values.
 - Timestamps use `TIMESTAMPTZ`; connections use UTC. Creation timestamps default to `now()`.
 - `updated_at` defaults to `now()` on insertion and is explicitly changed by application code on updates.
 - `TEXT` holds text, including Unicode user content. Public defaults and runtime messages are English.
@@ -100,10 +100,15 @@ An index on `(status, available_at, created_at)` supports ready-work selection. 
 
 The normal path is `QUEUED → RUNNING → SUCCEEDED`. Non-retryable processing exceptions become `FAILED`. Transient model failures requeue with a bounded delay. Interrupted work can be reclaimed after lease expiry; the defaults are a renewable 60-second lease and at most three claims. The worker serializes pending jobs within each conversation. These worker-baseline changes reuse the same four tables and constraints; see [Worker baseline](WORKER_BASELINE.md).
 
-These guarantees apply to database chat writes. They are not a claim of exactly-once external refunds or business actions, which are not implemented yet.
+## Read-only refund data
+
+- `orders` holds simulated orders assigned to individual users. The worker looks up an order by its number and the source conversation owner's ID.
+- `executions` holds one structured eligibility result per source message, including the requested order number, outcome, reasons, policy version and check time. The worker commits the result with the reply and job success.
+
+See [the demo setup](WORKER_BASELINE.md#read-only-refund-check) for sample data and how to run the check.
 
 ## Migration and review notes
 
 `0001_initial` contains the historical initial DDL. `0002_english_defaults` changes only the default for future title inserts; existing titles and messages remain unchanged. The English default is also defined in the request schema and ORM model.
 
-Later business workflows will add execution, tool, proposal, approval and event tables. New job types will require deliberate migration of the current job-kind and source-message uniqueness rules. See the [team guide](../README.md) for migration commands and test isolation.
+`0003_read_only_refund_check` creates `orders` and `executions`. The demo seed command runs after accounts exist. New job types for approval and resume work will require migration of the current job-kind and source-message uniqueness rules. See the [team guide](../README.md) for migration commands and test isolation.
