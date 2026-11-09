@@ -68,4 +68,24 @@ To exercise replication, start `docker compose up -d --scale worker=2 --wait` an
 
 ## Next execution milestone
 
-Agree with the team on tool-result/checkpoint records and exact proposal/approval contracts before adding simulated ticket/order reads and approved resolutions. Preserve the existing shared migration process. Cloud deployment will reuse the backend image with distinct API and worker startup commands; Swarm/Fly.io orchestration, secrets and persistent storage configuration remain separate deployment work.
+The next milestone is a read-only refund eligibility check for a simulated order. In the existing chat workspace, a user submits a message such as “Can order 1001 be refunded?” The API queues it through the existing message submission endpoint. The worker looks up the order, evaluates the demo policy, saves the result and writes a reply that the existing chat history displays.
+
+### Implementation
+
+1. Coordinate the schema with the team and add an Alembic revision for simulated orders and business execution records in the existing PostgreSQL database. Store each order's assigned user, payment and delivery status, paid amount in minor currency units, currency and delivery time. Seed demo orders after the fixture users exist and use a fixed clock in automated tests.
+2. Implement the demo policy in application code. A paid, delivered CAD order with a positive paid amount is eligible for a full refund through the end of the 30-day window measured from delivery. Return an eligibility outcome, reason codes, the eligible amount if applicable, the policy version and the check time. Report missing required data separately from a definite denial. Read the user from the job's conversation and filter the order lookup by both order ID and assigned user. Use the same response for an inaccessible order and a missing order.
+3. Route a documented demo input deterministically in fixed reply mode. Reuse the existing `PROCESS_MESSAGE` job, claim and conversation ordering. Keep ordinary chat on the existing reply path. Use the worker's existing claim check when committing the structured execution result, assistant message and job completion together. Key the execution record to its source message so a retry cannot create another result for that request.
+4. Use the current job status and conversation history endpoints to verify completion and display the reply. The `jobs` row holds scheduling state, the execution record holds the structured business result, and the `messages` row holds the user-facing reply.
+
+### Acceptance checks
+
+| Demo request | Expected result |
+| --- | --- |
+| Check order 1001, delivered five days ago | Eligible for 129.99 CAD |
+| Check order 1002, delivered 45 days ago | Ineligible because the window expired |
+| Check order 1003, missing its delivery time | More information required |
+| Check order 1005 as a different user | Same response as for a missing order |
+
+Use Docker Compose with fixed reply mode and the isolated PostgreSQL test database. Cover the exact 30-day boundary, ordinary chat, submission retries and worker lease expiry. A repeated submission or a replacement worker should leave one saved result and one reply for the source message. Verify that reopening the conversation displays the saved reply.
+
+Ticket lookup, approval and simulated business writes follow this milestone. Use the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md) when designing the tool results, checkpoints, and approval and resume contracts for that work.

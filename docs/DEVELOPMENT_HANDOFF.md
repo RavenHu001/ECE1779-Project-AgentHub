@@ -77,7 +77,9 @@ To verify persistence, save the conversation UUID printed by the smoke check, re
 
 ## Project direction
 
-The proposed course demo is a single support and refund triage workflow with synthetic tickets and orders. The agent gathers facts, checks eligibility and prepares a resolution. Applying a simulated business change requires human approval of the specific proposal. The next design step is to agree on the persisted tool results, checkpoints, approval and resume contracts before implementing the workflow.
+The proposed course demo is a single support and refund triage workflow with synthetic tickets and orders. The agent gathers facts, checks eligibility and prepares a resolution. Applying a simulated business change requires human approval of the specific proposal.
+
+The [next execution milestone](WORKER_BASELINE.md#next-execution-milestone) is a read-only check of refund eligibility for one simulated order. It defines the data, worker integration and acceptance cases for the first business task. Ticket lookup and approved resolutions follow the order check.
 
 Business tools, approval, SSE, cloud orchestration, deployment monitoring and automated backups remain planned. The [original architecture handover](AGENTHUB_TEAM_HANDOVER.md) explains the rationale and alternatives. Its React and cloud diagrams describe proposals. Use current code and team decisions to resolve differences.
 
