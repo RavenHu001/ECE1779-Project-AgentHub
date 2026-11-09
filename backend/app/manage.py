@@ -15,14 +15,15 @@ from app.models import Order, User
 from app.security import hash_password
 
 
-# Create or update an account; bootstrap leaves existing passwords unchanged.
-# 创建或更新账号；初始化时不改变已有账号密码。
 def save_user(username: str, password: str, *, bootstrap=False, reset=False):
+    """Save a development account with a non-empty ASCII password.
+    保存使用非空 ASCII 密码的开发账号，初始化时保留已有密码。
+    """
     username = username.strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", username):
         raise ValueError("Username must use 1-64 ASCII letters, numbers, dots, hyphens or underscores")
-    if len(password) < 12 or not password.isascii():
-        raise ValueError("Password must contain at least 12 ASCII characters for HTTP Basic authentication")
+    if not password or not password.isascii():
+        raise ValueError("Password must be non-empty and use only ASCII characters")
     with SessionLocal.begin() as session:
         user = session.scalar(select(User).where(User.username == username).with_for_update())
         if user:
@@ -115,7 +116,7 @@ def main():
                 raise ValueError("Run scripts/init_env.py before starting the services")
             save_user(os.environ.get("BOOTSTRAP_USERNAME", "developer"), password, bootstrap=True)
         else:
-            password = getpass.getpass("New password (12+ characters): ")
+            password = getpass.getpass("New password: ")
             if password != getpass.getpass("Confirm password: "):
                 raise ValueError("Passwords do not match")
             save_user(args.username, password, reset=args.command == "set-password")

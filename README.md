@@ -78,7 +78,7 @@ docker compose run --rm admin create-user alice
 docker compose run --rm admin create-user bob
 ```
 
-The command asks for and confirms the password without placing it in shell history. Usernames contain 1–64 ASCII letters, digits, dots, hyphens or underscores and begin with a letter or digit; they are normalized to lowercase. HTTP Basic passwords must contain at least 12 ASCII characters. Each account can access only its own conversations, messages and jobs.
+The command asks for and confirms the password without placing it in shell history. Usernames contain 1–64 ASCII letters, digits, dots, hyphens or underscores and begin with a letter or digit. They are normalized to lowercase. Development passwords must contain at least one ASCII character. Each account can access only its own conversations, messages and jobs.
 
 To change an existing password:
 

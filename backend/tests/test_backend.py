@@ -15,7 +15,7 @@ from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.db import SessionLocal, engine
-from app.manage import seed_demo_orders
+from app.manage import save_user, seed_demo_orders
 from app.models import Base, Conversation, Execution, Job, Message, Order, User
 from app.refund_eligibility import evaluate_refund_eligibility, parse_refund_order_id
 from app.worker import LostLease, claim_job, complete_job, run_once
@@ -43,6 +43,19 @@ def test_health_and_authentication(client):
     with SessionLocal.begin() as session:
         session.scalar(select(User).where(User.username == "alice")).is_active = False
     assert client.get("/conversations").status_code == 401
+
+
+def test_development_account_accepts_one_character_password(client):
+    """Allow single-character passwords when creating and resetting a development account.
+    验证开发账号创建和重置密码时均可使用一个字符的密码。
+    """
+    save_user("short-password", "1")
+    assert client.get("/me", auth=("short-password", "1")).status_code == 200
+    save_user("short-password", "2", reset=True)
+    assert client.get("/me", auth=("short-password", "1")).status_code == 401
+    assert client.get("/me", auth=("short-password", "2")).status_code == 200
+    with pytest.raises(ValueError, match="non-empty"):
+        save_user("short-password", "", reset=True)
 
 
 def test_fixed_reply_pipeline_and_pagination(client):
