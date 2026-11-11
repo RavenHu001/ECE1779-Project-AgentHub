@@ -4,15 +4,19 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import SessionLocal, engine
 from app.manage import seed_demo_orders
 from app.models import AppliedResolution, Job, Order, ProposalDecision, ResolutionProposal, Ticket
+from app.support_workflow import PrepareRefund, prepare_refund
 from app.worker import LostLease, claim_job, complete_job, run_once
 
 
@@ -196,6 +200,55 @@ def test_later_queued_turn_waits_for_earlier_proposal(client, demo_tickets, rele
     messages = client.get(path).json()
     assert [row["role"] for row in messages] == ["user", "user", "assistant", "assistant"]
     assert [row["reply_to_message_id"] for row in messages[2:]] == [row["id"] for row in messages[:2]]
+
+
+@pytest.mark.parametrize("later_action", ["reject", "expire"])
+def test_upgraded_pending_proposals_finalize_in_source_order(client, demo_tickets, accounts, later_action):
+    """Upgrade planning-only history with two pending proposals and preserve turn order.
+    升级包含两份待审批方案的历史记录，并保持来源消息顺序。
+    """
+    path, _, first = submit(client, "Prepare a refund for ticket 391")
+    second = client.post(
+        path, json={"content": "Prepare a refund for ticket 396", "submission_key": str(uuid4())}
+    ).json()
+    # Reproduce the planning-only release, where both source jobs could complete before any decision.
+    # 复现仅支持方案准备的版本，两个来源待办都可在审批前完成。
+    with SessionLocal.begin() as session:
+        for receipt, ticket_id in [(first, 391), (second, 396)]:
+            assert (
+                prepare_refund(
+                    session, UUID(receipt["message_id"]), accounts[0], PrepareRefund(ticket_id=ticket_id)
+                )
+                is None
+            )
+            job = session.get(Job, UUID(receipt["job_id"]))
+            job.status = "SUCCEEDED"
+            job.attempts = 1
+            job.started_at = job.finished_at = func.clock_timestamp()
+    original = [row["proposal"]["id"] for row in client.get(path).json()]
+    cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    command.downgrade(cfg, "0005_resolution_proposals")
+    command.upgrade(cfg, "head")
+    earlier, later = [row["proposal"] for row in client.get(path).json()]
+    assert [earlier["id"], later["id"]] == original
+
+    # Rejecting or expiring the later proposal must wait for the older continuation.
+    # 拒绝或终止已过期的后续方案，都必须等待前序恢复待办。
+    assert decide(client, later, "REJECT").status_code == 409
+    if later_action == "expire":
+        expire_proposal(later)
+        assert not run_once("expiry-worker")
+    assert decide(client, earlier).status_code == 200
+    assert decide(client, later, "REJECT").status_code == 409
+    assert run_once("continuation-worker")
+    if later_action == "expire":
+        assert run_once("expiry-worker")
+    else:
+        assert decide(client, later, "REJECT").status_code == 200
+    rows = client.get(path).json()
+    assert [row["reply_to_message_id"] for row in rows[2:]] == [first["message_id"], second["message_id"]]
+    assert rows[0]["proposal"]["status"] == "COMPLETED"
+    assert rows[1]["proposal"]["status"] == ("INVALIDATED" if later_action == "expire" else "REJECTED")
 
 
 def test_parallel_proposals_can_refund_order_only_once(client, demo_tickets):

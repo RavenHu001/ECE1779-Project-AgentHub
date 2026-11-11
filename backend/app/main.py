@@ -20,6 +20,7 @@ from app.resolution_workflow import (
     PROPOSAL_VERSION,
     active_resolution_exists,
     close_proposal,
+    unfinished_turn_before,
 )
 from app.schemas import (
     ConversationCreate,
@@ -270,7 +271,7 @@ def decide_proposal(
         # Serialize decisions with message submissions and final replies in the same conversation.
         # 将审批与同一会话的消息提交、最终回复串行化。
         row = session.execute(
-            select(Conversation, ResolutionProposal)
+            select(Conversation, ResolutionProposal, Message.seq)
             .join(Message, Message.conversation_id == Conversation.id)
             .join(Execution, Execution.source_message_id == Message.id)
             .join(ResolutionProposal, ResolutionProposal.execution_id == Execution.id)
@@ -279,7 +280,7 @@ def decide_proposal(
         ).one_or_none()
         if row is None:
             raise HTTPException(404, "Proposal not found")
-        conversation, proposal = row
+        conversation, proposal, source_seq = row
         if payload.version != PROPOSAL_VERSION:
             raise HTTPException(409, "Proposal version has changed")
         execution = session.get(Execution, proposal.execution_id, with_for_update=True)
@@ -293,6 +294,12 @@ def decide_proposal(
             return ProposalDecisionOut.model_validate(existing)
         if execution.status != "WAITING_FOR_APPROVAL":
             raise HTTPException(409, "Proposal is no longer waiting for approval")
+        # Upgraded conversations can contain several pending proposals from the planning-only release.
+        # 从仅支持准备方案的版本升级时，同一会话可能保留多个待审批方案。
+        if session.scalar(select(unfinished_turn_before(conversation.id, source_seq))):
+            raise HTTPException(
+                409, "Resolve earlier turns in this conversation before deciding this proposal"
+            )
         now = session.scalar(select(func.clock_timestamp()))
         if now >= proposal.expires_at:
             close_proposal(session, conversation, execution, "INVALIDATED", EXPIRED_REPLY)

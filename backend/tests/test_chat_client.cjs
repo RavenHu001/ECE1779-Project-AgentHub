@@ -285,6 +285,7 @@ for (const decision of ["APPROVE", "REJECT"]) {
       customer_reply: "The refund is eligible.",
     };
     let calls = 0;
+    let jobReads = 0;
     let releaseDecision;
     const decisionResponse = new Promise(resolve => { releaseDecision = resolve; });
     const client = createClient(async (url, options) => {
@@ -297,6 +298,9 @@ for (const decision of ["APPROVE", "REJECT"]) {
         return response({});
       }
       if (url === "/jobs/resume-job") {
+        // A brief outage must not strand the card before a later successful read.
+        // 短暂故障后，后续成功读取仍应刷新方案卡片。
+        if (++jobReads === 1) return { ok: false, status: 503 };
         proposal.status = "COMPLETED";
         return response({ status: "SUCCEEDED" });
       }
@@ -318,7 +322,7 @@ for (const decision of ["APPROVE", "REJECT"]) {
     await first;
 
     const expected = decision === "APPROVE" ? "Completed" : "Rejected";
-    for (let i = 0; i < 25 && client.element("messages").children[1].children[1].textContent !== expected; i++) {
+    for (let i = 0; i < 55 && client.element("messages").children[1].children[1].textContent !== expected; i++) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     const card = client.element("messages").children[1];
@@ -326,3 +330,37 @@ for (const decision of ["APPROVE", "REJECT"]) {
     assert.ok(!card.children.some(child => child.className === "proposal-actions"));
   });
 }
+
+test("switching chats clears old proposal controls before history loads", async () => {
+  const proposal = {
+    id: "old-proposal", version: 1, status: "WAITING_FOR_APPROVAL", ticket_id: "391", order_id: "1001",
+    refund_amount_minor: "12999", currency: "CAD", proposed_ticket_status: "RESOLVED",
+    delivered_at: "2026-11-06T12:00:00Z", expires_at: "2026-11-12T12:00:00Z", policy_version: "DEMO-CAD-30D/v1",
+    customer_reply: "The refund is eligible.",
+  };
+  let resolveHistory;
+  let decisions = 0;
+  const delayedHistory = new Promise(resolve => { resolveHistory = resolve; });
+  const client = createClient(async url => {
+    if (url.startsWith("/proposals/")) {
+      decisions++;
+      return response({});
+    }
+    if (url.startsWith("/conversations/old-chat/messages?")) {
+      return response([{ seq: 1, role: "user", content: "Old request", proposal }]);
+    }
+    return delayedHistory;
+  });
+  await client.run("authorization = 'Basic demo'; openConversation({id:'old-chat', title:'Old'})");
+  const staleButton = client.element("messages").children[1].children[6].children[0];
+  const switching = client.run("openConversation({id:'new-chat', title:'New'})");
+  assert.deepEqual(client.element("messages").children, []);
+
+  // Even a queued click from a detached card cannot decide the old proposal.
+  // 即使已移除卡片仍有排队的点击事件，也不得审批旧方案。
+  await staleButton.listeners.get("click")();
+  assert.equal(decisions, 0);
+  resolveHistory(response([{ seq: 1, role: "user", content: "New request" }]));
+  await switching;
+  assert.equal(client.element("messages").children[0].children[1].textContent, "New request");
+});

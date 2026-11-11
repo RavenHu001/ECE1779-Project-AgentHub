@@ -5,7 +5,7 @@
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.models import (
     AppliedResolution,
@@ -76,6 +76,37 @@ def active_resolution_exists(session: Session, conversation_id: UUID) -> bool:
     )
 
 
+def unfinished_turn_before(conversation_id, source_seq):
+    """Build a predicate for any earlier unfinished turn in the same conversation.
+    构造谓词，用于检查同一会话中是否仍有未完成的较早轮次。
+    """
+    earlier = aliased(Message)
+    # A pending proposal still owns its turn after the initial job has completed.
+    # 初始待办结束后，待审批方案仍占用原会话轮次。
+    queued_job = (
+        select(Job.id)
+        .where(Job.source_message_id == earlier.id, Job.status.in_(["QUEUED", "RUNNING"]))
+        .correlate(earlier)
+        .exists()
+    )
+    waiting_proposal = (
+        select(Execution.id)
+        .where(Execution.source_message_id == earlier.id, Execution.status == "WAITING_FOR_APPROVAL")
+        .correlate(earlier)
+        .exists()
+    )
+    return (
+        select(earlier.id)
+        .where(
+            earlier.conversation_id == conversation_id,
+            earlier.seq < source_seq,
+            or_(queued_job, waiting_proposal),
+        )
+        .correlate_except(earlier)
+        .exists()
+    )
+
+
 def expire_pending_proposal(session: Session) -> bool:
     """Close one expired waiting proposal without blocking another worker's conversation.
     关闭一份已过期待审批方案，并跳过其他 worker 锁定的会话。
@@ -83,13 +114,14 @@ def expire_pending_proposal(session: Session) -> bool:
     # Lock the conversation first, as the decision API does, and verify the state again after locking.
     # 与审批接口一样先锁定会话，取得锁后再次核对方案状态。
     row = session.execute(
-        select(Conversation, Execution.id)
+        select(Conversation, Execution.id, Message.seq)
         .join(Message, Message.conversation_id == Conversation.id)
         .join(Execution, Execution.source_message_id == Message.id)
         .join(ResolutionProposal, ResolutionProposal.execution_id == Execution.id)
         .where(
             Execution.status == "WAITING_FOR_APPROVAL",
             ResolutionProposal.expires_at <= func.clock_timestamp(),
+            ~unfinished_turn_before(Conversation.id, Message.seq),
         )
         .order_by(ResolutionProposal.expires_at, ResolutionProposal.id)
         .with_for_update(of=Conversation, skip_locked=True)
@@ -97,9 +129,13 @@ def expire_pending_proposal(session: Session) -> bool:
     ).one_or_none()
     if row is None:
         return False
-    conversation, execution_id = row
+    conversation, execution_id, source_seq = row
     execution = session.get(Execution, execution_id, with_for_update=True)
     if execution.status != "WAITING_FOR_APPROVAL":
+        return False
+    # Read the predecessor state again under the conversation lock before writing the final reply.
+    # 在写入最终回复前，持有会话锁再次读取前序轮次状态。
+    if session.scalar(select(unfinished_turn_before(conversation.id, source_seq))):
         return False
     close_proposal(session, conversation, execution, "INVALIDATED", EXPIRED_REPLY)
     return True

@@ -37,8 +37,12 @@ async function api(path, body) {
   if (!response.ok) {
     // Present safe English summaries instead of exposing raw server or provider errors.
     // 使用安全的英文错误摘要，不直接展示服务端或模型提供商的原始错误正文。
-    if (response.status === 401) throw new Error("Please check your username and password, then sign in again.");
-    throw new Error("Request failed (" + response.status + "). Please try again.");
+    const message = response.status === 401
+      ? "Please check your username and password, then sign in again."
+      : response.status === 409
+        ? "This conversation changed. Review its latest messages before trying again."
+        : "Request failed (" + response.status + "). Please try again.";
+    throw Object.assign(new Error(message), { status: response.status });
   }
   return response.json();
 }
@@ -82,20 +86,26 @@ function status(text = "", working = false) {
 /** Save a decision, then refresh the card only if its conversation is still open.
  * 保存审批决定；仅在其会话仍处于打开状态时刷新方案卡片。
  */
-async function decideProposal(proposal, decision, buttons) {
-  if (pendingDecisions.has(proposal.id)) return;
-  const activeGeneration = generation;
+async function decideProposal(proposal, decision, buttons, activeGeneration) {
+  if (generation !== activeGeneration || pendingDecisions.has(proposal.id)) return;
   pendingDecisions.add(proposal.id);
   buttons.forEach(button => button.disabled = true);
   notice();
+  let receipt;
   try {
-    await api("/proposals/" + proposal.id + "/decision", { decision, version: proposal.version });
+    receipt = await api("/proposals/" + proposal.id + "/decision", { decision, version: proposal.version });
     if (generation === activeGeneration) await renderMessages(busy);
   } catch (error) {
     // A conflicting or uncertain response may still leave a committed decision to display.
     // 发生冲突或响应不确定时，服务端仍可能已有可展示的已提交决定。
     if (generation === activeGeneration) {
-      await renderMessages(busy).catch(() => {});
+      await renderMessages(busy).catch(() => {
+        // The receipt can keep an approved job observable even if the history read fails.
+        // 即使历史读取失败，也可用已收到的批准回执继续跟踪待办。
+        if (generation === activeGeneration && receipt?.resume_job_id) {
+          watchResolution({ ...receipt, status: "QUEUED" });
+        }
+      });
       if (generation === activeGeneration) notice(error.message);
     }
   } finally {
@@ -122,11 +132,20 @@ async function watchResolution(proposal) {
     while (generation === activeGeneration && Date.now() < deadline) {
       await sleep(750);
       if (generation !== activeGeneration) return;
-      const job = await api("/jobs/" + proposal.resume_job_id);
-      if (generation !== activeGeneration) return;
-      if (job.status !== lastStatus) await renderMessages(busy);
-      if (job.status === "SUCCEEDED" || job.status === "FAILED") return;
-      lastStatus = job.status;
+      try {
+        const job = await api("/jobs/" + proposal.resume_job_id);
+        if (generation !== activeGeneration) return;
+        if (job.status !== lastStatus) await renderMessages(busy);
+        if (job.status === "SUCCEEDED" || job.status === "FAILED") return;
+        lastStatus = job.status;
+      } catch (error) {
+        // Brief network or server failures should not hide a later terminal result.
+        // 短暂网络或服务端故障不应让后续终态无法显示。
+        if (error.status && error.status < 500 && error.status !== 429) throw error;
+      }
+    }
+    if (generation === activeGeneration) {
+      notice("Still waiting for the refund result. Reopen this conversation to check again.");
     }
   } catch (error) {
     if (generation === activeGeneration) notice(error.message);
@@ -192,6 +211,7 @@ function renderProposal(proposal) {
     // 只有待审批方案展示人工审批操作。
     const actions = document.createElement("div");
     actions.className = "proposal-actions";
+    const cardGeneration = generation;
     const buttons = [];
     for (const [decision, label] of [["APPROVE", "Approve"], ["REJECT", "Reject"]]) {
       const button = document.createElement("button");
@@ -199,7 +219,7 @@ function renderProposal(proposal) {
       button.className = decision === "APPROVE" ? "proposal-approve" : "proposal-reject";
       button.textContent = label;
       button.disabled = pendingDecisions.has(proposal.id);
-      button.addEventListener("click", () => decideProposal(proposal, decision, buttons));
+      button.addEventListener("click", () => decideProposal(proposal, decision, buttons, cardGeneration));
       buttons.push(button);
     }
     actions.append(...buttons);
@@ -377,6 +397,9 @@ async function openConversation(row) {
   if (row.id !== conversation) {
     rememberDraft();
     restoreDraft(row.id);
+    // Clear the previous conversation's controls before the new history request starts.
+    // 发起新会话的历史请求前，清除上一会话中可操作的控件。
+    showMessages([]);
   }
   generation++;
   conversation = row.id;
@@ -563,6 +586,9 @@ $("message-form").addEventListener("submit", async event => {
     // 传输失败时保留原文及待确认标识，避免重试创建重复消息或后台任务。
     status("Needs attention");
     document.querySelector(".pending-message")?.remove();
+    // Another tab may have paused this conversation with a newly saved proposal.
+    // 另一标签页可能刚保存了方案，并因此暂停了当前会话。
+    if (error.status === 409 && conversation) await renderMessages().catch(() => {});
     notice(error.message);
   } finally {
     setBusy(false);

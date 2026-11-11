@@ -17,9 +17,14 @@ from sqlalchemy.orm import aliased
 
 from app.config import positive_number
 from app.db import SessionLocal
-from app.models import Conversation, Execution, Job, Message
+from app.models import Conversation, Job, Message
 from app.replies import FixedReply, ReplySettings, RetryableReplyError, build_reply_provider
-from app.resolution_workflow import append_final_reply, apply_approved_resolution, expire_pending_proposal
+from app.resolution_workflow import (
+    append_final_reply,
+    apply_approved_resolution,
+    expire_pending_proposal,
+    unfinished_turn_before,
+)
 from app.support_workflow import check_demo_refund_request, parse_prepare_refund, prepare_refund
 
 log = logging.getLogger(__name__)
@@ -57,33 +62,6 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
     """Atomically claim ready work without overtaking an unfinished conversation turn.
     原子领取已就绪的任务，且不越过同一会话中尚未完成的较早消息。
     """
-    # Match predecessors by source-message sequence, including retries not yet ready.
-    # 根据来源消息的顺序查找前置任务，尚未到重试时间的任务也会阻挡后续消息。
-    earlier_job = aliased(Job)
-    earlier_message = aliased(Message)
-    pending_predecessor = (
-        select(earlier_job.id)
-        .join(earlier_message, earlier_job.source_message_id == earlier_message.id)
-        .where(
-            earlier_message.conversation_id == Message.conversation_id,
-            earlier_message.seq < Message.seq,
-            earlier_job.status.in_(["QUEUED", "RUNNING"]),
-        )
-        .exists()
-    )
-    # A planning job can finish while its proposal still owns the earlier turn.
-    # 方案准备待办结束后，待审批方案仍占用较早的会话轮次。
-    waiting_message = aliased(Message)
-    waiting_predecessor = (
-        select(Execution.id)
-        .join(waiting_message, waiting_message.id == Execution.source_message_id)
-        .where(
-            waiting_message.conversation_id == Message.conversation_id,
-            waiting_message.seq < Message.seq,
-            Execution.status == "WAITING_FOR_APPROVAL",
-        )
-        .exists()
-    )
     with SessionLocal.begin() as session:
         # Use database time and skip locked jobs so replicas do not share one claim.
         # 使用数据库时间并跳过已锁定任务，避免多个副本领取同一项工作。
@@ -92,8 +70,9 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
             select(Job)
             .join(Message, Job.source_message_id == Message.id)
             .where(
-                ~pending_predecessor,
-                ~waiting_predecessor,
+                # Keep retries and approvals ahead of every later turn in the same conversation.
+                # 同一会话中的重试与审批均优先于后续轮次。
+                ~unfinished_turn_before(Message.conversation_id, Message.seq),
                 or_(
                     and_(Job.status == "QUEUED", Job.available_at <= now),
                     and_(Job.status == "RUNNING", Job.lease_expires_at <= now),
