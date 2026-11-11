@@ -1,6 +1,6 @@
 # Backend Manual Testing Guide
 
-Use this guide to manually check the current Docker backend with Swagger UI or Postman. The implemented scope is authenticated chat, durable jobs and fixed English replies. These cases do not test model integration, approvals, SSE or refunds.
+Use Swagger UI or Postman for the authenticated chat and worker checks (MT01–MT15). Use the browser workspace for the fixed-mode refund workflow (MT16–MT19).
 
 For setup details, see the [team guide](../README.md). The [Chinese companion](developer/zh-CN/MANUAL_TESTING.md) uses the same case IDs and result fields.
 
@@ -186,6 +186,19 @@ Authenticate as A again and query `C1` and `J1`. Expected: the recorded messages
 
 **Do not add `-v` or `--volumes`: those options delete the database volume.** Container persistence is not a backup-restore test.
 
+## Refund workflow in the browser
+
+Use a fresh local demo database with `REPLY_MODE=fixed`. After starting Compose, [create active accounts](../README.md#individual-accounts) `alice` and `bob`, then run `docker compose run --rm admin seed-demo-tickets alice bob`. Re-running the seed command preserves resolved tickets and existing refunds. Open the workspace at <http://127.0.0.1:8000/> and sign in as Alice.
+
+| Case | Action | Expected result |
+| --- | --- | --- |
+| MT16 | Send `Look up ticket 391` and then `Look up ticket 395`. | Ticket `391` is open, links to order `1001`, and is eligible for CAD 129.99. Bob's ticket `395` returns `Ticket not found.` |
+| MT17 | Send `Prepare a refund for ticket 391`. Refresh, sign in again, and reopen the conversation. | The same **Waiting for approval** card appears once, with the same amount and customer reply draft. |
+| MT18 | Click **Reject**, then send `Look up ticket 391`. | The card shows **Rejected**. The ticket is still open and the order is still eligible. |
+| MT19 | Prepare a new proposal for `391` and click **Approve**. Wait for **Completed**, refresh and reopen the conversation, then look up `391` again. | History shows one rejected card, one completed card, and one final reply confirming a simulated refund of CAD 129.99. The ticket is resolved and the order has already been refunded. |
+
+To check decision retries in Swagger, obtain the completed card's `proposal.id` from the conversation history response. Post `{"version":1,"decision":"APPROVE"}` to `/proposals/{proposal_id}/decision` twice. Both requests return the same receipt. Posting `REJECT` for the same proposal returns HTTP `409`.
+
 ## Investigate a failure
 
 Record the case ID, HTTP status, sanitized response, relevant resource IDs and time. Inspect a failed job's `last_error` and the relevant logs:
@@ -229,10 +242,14 @@ Copy this section for each manual test run. Result values are `NOT_RUN`, `PASS`,
 | MT13 | Other account's resources | HTTP 404; C1 absent from B's list | To fill | NOT_RUN |
 | MT14 | Stopped worker | QUEUED, then one reply and SUCCEEDED | To fill | NOT_RUN |
 | MT15 | Container recreation | Same saved records and account access | To fill | NOT_RUN |
+| MT16 | Ticket lookup and ownership | Ticket 391 is eligible; ticket 395 is hidden from Alice | To fill | NOT_RUN |
+| MT17 | Pending proposal after refresh | One card with the same amount and draft | To fill | NOT_RUN |
+| MT18 | Reject proposal | Rejected; ticket remains open | To fill | NOT_RUN |
+| MT19 | Approve and reopen history | Completed; one simulated refund and resolved ticket | To fill | NOT_RUN |
 
 | Follow-up detail | Value |
 | --- | --- |
-| Totals | PASS: __ / FAIL: __ / BLOCKED: __ / NOT_RUN: __; total 15 |
+| Totals | PASS: __ / FAIL: __ / BLOCKED: __ / NOT_RUN: __; total 19 |
 | Issue links and reproduction steps | To fill |
 | Retest date and result | To fill |
 | Environment restored | To fill: confirm the worker is running and check pending work and service health |
