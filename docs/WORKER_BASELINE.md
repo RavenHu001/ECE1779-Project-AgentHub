@@ -89,4 +89,16 @@ Use Docker Compose with fixed reply mode and the isolated PostgreSQL test databa
 
 See the [developer implementation guide](developer/zh-CN/AGENTHUB_READ_ONLY_REFUND_CHECK.md) for the data fields, request flow, worker transaction and tests.
 
-Ticket lookup, approval and simulated business writes follow this milestone. Use the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md) when designing the tool results, checkpoints, and approval and resume contracts for that work.
+## Read-only ticket lookup
+
+In fixed mode, seed the linked tickets and orders after creating the two active demo accounts.
+
+```bash
+docker compose run --rm admin seed-demo-tickets alice bob
+```
+
+Sign in as `alice` and send `Look up ticket 391` or `查询工单 391`. The reply includes the ticket status and the refund eligibility of the linked order. Tickets `392` and `393` exercise the expired window and missing delivery date. Ticket `395` belongs to Bob and returns the same response as an unknown ticket when Alice asks for it. A visible ticket with a missing or inaccessible order reports that more information is required.
+
+The seed command can be repeated. It preserves existing order facts and ticket status and rejects conflicting ownership or links. A successful linked-order lookup saves its eligibility result with the chat reply and job success. Ticket lookup leaves business records unchanged.
+
+Approval and simulated business writes follow this milestone. See the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md).

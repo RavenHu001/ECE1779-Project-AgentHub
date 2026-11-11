@@ -16,8 +16,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.db import SessionLocal, engine
 from app.manage import save_user, seed_demo_orders
-from app.models import Base, Conversation, Execution, Job, Message, Order, User
+from app.models import Base, Conversation, Execution, Job, Message, Order, Ticket, User
 from app.refund_eligibility import evaluate_refund_eligibility, parse_refund_order_id
+from app.ticket_lookup import parse_ticket_id
 from app.worker import LostLease, claim_job, complete_job, run_once
 
 
@@ -172,12 +173,121 @@ def test_refund_request_requires_a_complete_valid_order_number(content):
     assert parse_refund_order_id(content) is None
 
 
-def test_refund_completion_rejects_stale_claim_and_rolls_back(client):
+@pytest.mark.parametrize(
+    "content, order_id, outcome, reply",
+    [
+        (
+            "Look up ticket 391",
+            1001,
+            "ELIGIBLE",
+            "Ticket 391 is open. Order 1001 is eligible for a simulated refund of CAD 129.99.",
+        ),
+        (
+            "查询工单 #392",
+            1002,
+            "INELIGIBLE",
+            "Ticket 392 is open. Order 1002 is not eligible for a simulated refund. "
+            "The 30-day refund window has expired.",
+        ),
+        (
+            "Look up ticket 393",
+            1003,
+            "NEEDS_INFORMATION",
+            "Ticket 393 is open. More information is required to check order 1003. The delivery date is missing.",
+        ),
+        ("Look up ticket 395", None, None, "Ticket not found."),
+        ("Look up ticket 900", None, None, "Ticket not found."),
+    ],
+)
+def test_ticket_lookup_via_message(client, content, order_id, outcome, reply):
+    """Exercise ticket lookup and its persisted reply through the existing chat API.
+    通过现有聊天接口验证工单查询及持久化回复。
+    """
+    seed_demo_orders("alice", "bob", with_tickets=True)
+    conversation, payload, receipt = submit(client, content=content)
+    assert run_once("ticket-worker")
+    url = f"/conversations/{conversation}/messages"
+
+    # Replaying the request must return the original receipt and leave one reply.
+    # 重放请求应返回原有回执，并且只保留一条回复。
+    assert client.post(url, json=payload).json() == receipt
+    assert not run_once("ticket-worker")
+    assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "SUCCEEDED"
+    assert [message["content"] for message in client.get(url).json()] == [content, reply]
+
+    # Only a visible linked order yields a saved eligibility record.
+    # 仅在关联订单可见时保存资格记录。
+    with SessionLocal() as session:
+        records = session.scalars(select(Execution)).all()
+        assert [(record.requested_order_id, record.outcome) for record in records] == (
+            [(order_id, outcome)] if order_id is not None else []
+        )
+        assert session.get(Ticket, 391).status == "OPEN"
+
+
+@pytest.mark.parametrize("linked_order_id", [None, 1005])
+def test_ticket_lookup_hides_inaccessible_order(client, accounts, linked_order_id):
+    """Treat an inaccessible order like a missing link, without revealing its number.
+    将无权访问的订单与未关联订单同等处理，并隐藏其编号。
+    """
+    seed_demo_orders("alice", "bob")
+    with SessionLocal.begin() as session:
+        session.add(Ticket(id=398, assigned_user_id=accounts[0], order_id=linked_order_id))
+    conversation, _, _ = submit(client, content="Look up ticket 398")
+    assert run_once("ticket-worker")
+    messages = client.get(f"/conversations/{conversation}/messages").json()
+    assert messages[-1]["content"] == (
+        "Ticket 398 is open. More information is required. No accessible order is linked to this ticket."
+    )
+    with SessionLocal() as session:
+        assert session.scalars(select(Execution)).first() is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Look up ticket 0",
+        "Look up ticket 9223372036854775808",
+        "查询工单 ３９１",
+        "Look up ticket 391 and 392",
+        "Quote: Look up ticket 391",
+    ],
+)
+def test_ticket_parser_requires_one_complete_valid_number(content):
+    """Reject ambiguous, quoted, and out-of-range ticket requests.
+    拒绝含歧义、引用或超出范围的工单查询。
+    """
+    assert parse_ticket_id(content) is None
+
+
+def test_ticket_seed_preserves_status_and_rejects_relinking(accounts):
+    """Allow repeated setup while preserving saved status and order links.
+    允许重复初始化，同时保留已保存的状态与订单关联。
+    """
+    seed_demo_orders("alice", "bob", with_tickets=True)
+    with SessionLocal.begin() as session:
+        session.get(Ticket, 391).status = "RESOLVED"
+    seed_demo_orders("alice", "bob", with_tickets=True)
+
+    # Simulate a conflicting existing link without changing the assigned account.
+    # 在保留原有归属的情况下模拟已有订单关联冲突。
+    with SessionLocal.begin() as session:
+        ticket = session.get(Ticket, 391)
+        assert (ticket.assigned_user_id, ticket.order_id, ticket.status) == (accounts[0], 1001, "RESOLVED")
+        ticket.order_id = 1002
+    with pytest.raises(ValueError, match="different accounts or order links"):
+        seed_demo_orders("alice", "bob", with_tickets=True)
+    with SessionLocal() as session:
+        assert session.get(Ticket, 391).order_id == 1002
+
+
+@pytest.mark.parametrize("content", ["Can order 1001 be refunded?", "Look up ticket 391"])
+def test_refund_completion_rejects_stale_claim_and_rolls_back(client, content):
     """Keep the execution and reply atomic across worker takeover and a failed update.
     验证 worker 接管或最终更新失败时，资格记录和回复仍保持事务一致。
     """
-    seed_demo_orders("alice", "bob")
-    conversation, _, receipt = submit(client, content="Can order 1001 be refunded?")
+    seed_demo_orders("alice", "bob", with_tickets=True)
+    conversation, _, receipt = submit(client, content=content)
     old = claim_job("old-refund-worker")
     expire(old.job_id)
     new = claim_job("new-refund-worker")

@@ -215,6 +215,23 @@ class Order(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# A synthetic support ticket visible only to the assigned employee account.
+# 一张仅对指派员工账号可见的模拟客服工单。
+class Ticket(Base):
+    __tablename__ = "tickets"
+    __table_args__ = (
+        CheckConstraint("id > 0", name="ck_tickets_id"),
+        CheckConstraint("status IN ('OPEN', 'RESOLVED')", name="ck_tickets_status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    assigned_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    # An open ticket can be recorded before the associated order is known.
+    # 尚未确认关联订单时，仍可登记一张打开的工单。
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="RESTRICT"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'OPEN'"))
+
+
 # A durable eligibility result for one source message, separate from job scheduling.
 # 一条来源消息对应一份持久化资格结果，与待办调度状态分开保存。
 class Execution(Base):

@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import Session, aliased
 
 from app.config import positive_number
 from app.db import SessionLocal
@@ -25,6 +25,7 @@ from app.refund_eligibility import (
     parse_refund_order_id,
 )
 from app.replies import FixedReply, ReplySettings, RetryableReplyError, build_reply_provider
+from app.ticket_lookup import lookup_ticket, parse_ticket_id
 
 log = logging.getLogger(__name__)
 
@@ -244,12 +245,56 @@ def retry_job(claim: Claim, *, max_attempts):
         clear_lease(job)
 
 
+def check_demo_refund_request(session: Session, source: Message, user_id: UUID) -> str | None:
+    """Resolve a fixed-mode order or ticket request and stage its eligibility result.
+    处理固定模式下的订单或工单请求，并将资格结果加入当前事务。
+    """
+    # Resolve the ticket and order as the owner of the saved conversation.
+    # 使用已保存会话的所有者身份查询工单与订单。
+    ticket_id = parse_ticket_id(source.content)
+    prefix = ""
+    if ticket_id is not None:
+        match = lookup_ticket(session, user_id, ticket_id)
+        if match is None:
+            return "Ticket not found."
+        status, order = match
+        prefix = f"Ticket {ticket_id} is {status.lower()}. "
+        if order is None:
+            return prefix + "More information is required. No accessible order is linked to this ticket."
+        order_id = order.id
+    else:
+        order_id = parse_refund_order_id(source.content)
+        if order_id is None:
+            return None
+        order = session.scalar(select(Order).where(Order.id == order_id, Order.assigned_user_id == user_id))
+
+    # Both paths use the same policy, check time, and order eligibility record.
+    # 两条路径共用同一退款规则、检查时刻和订单资格记录。
+    checked_at = session.scalar(select(func.clock_timestamp()))
+    result = evaluate_refund_eligibility(order, checked_at)
+    session.add(
+        Execution(
+            source_message_id=source.id,
+            requested_order_id=order_id,
+            outcome=result.outcome,
+            reason_codes=list(result.reason_codes),
+            refund_amount_minor=result.refund_amount_minor,
+            currency=result.currency,
+            policy_version=POLICY_VERSION,
+            checked_at=checked_at,
+        )
+    )
+    return prefix + format_refund_reply(order_id, result)
+
+
 # Commit the result and completion together, rechecking ownership before success.
 # 一起提交处理结果与完成状态，在标记成功前再次核对领取权。
 def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = False):
-    """Commit one reply, any refund check, and job success under the same claim.
-    在同一次有效领取下提交唯一回复、退款检查结果和任务成功状态。
+    """Commit one reply, any order eligibility result, and job success under the same claim.
+    在同一次有效领取下提交唯一回复、订单资格结果和任务成功状态。
     """
+    # Lock the current job and load the source of the reply before staging writes.
+    # 在准备写入前锁定当前待办，并读取回复对应的来源消息。
     if not reply.strip():
         raise ValueError("Reply must not be blank")
     with SessionLocal.begin() as session:
@@ -264,28 +309,10 @@ def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = Fals
         conversation = session.scalar(
             select(Conversation).where(Conversation.id == source.conversation_id).with_for_update()
         )
-        # The order lookup uses the owner of the saved conversation.
-        # 订单查询使用已保存会话的所有者身份。
-        order_id = parse_refund_order_id(source.content) if check_refund_requests else None
-        if order_id is not None:
-            order = session.scalar(
-                select(Order).where(Order.id == order_id, Order.assigned_user_id == conversation.user_id)
-            )
-            checked_at = session.scalar(select(func.clock_timestamp()))
-            result = evaluate_refund_eligibility(order, checked_at)
-            session.add(
-                Execution(
-                    source_message_id=source.id,
-                    requested_order_id=order_id,
-                    outcome=result.outcome,
-                    reason_codes=list(result.reason_codes),
-                    refund_amount_minor=result.refund_amount_minor,
-                    currency=result.currency,
-                    policy_version=POLICY_VERSION,
-                    checked_at=checked_at,
-                )
-            )
-            reply = format_refund_reply(order_id, result)
+        # Stage the eligibility result and the reply together inside the fenced transaction.
+        # 在受领取权保护的同一事务中准备资格记录和回复。
+        if check_refund_requests:
+            reply = check_demo_refund_request(session, source, conversation.user_id) or reply
         session.add(
             Message(
                 conversation_id=conversation.id,
@@ -353,8 +380,8 @@ def run_once(
     provider=None,
     settings=None,
 ) -> bool:
-    """Process one claim, allowing the documented refund requests in fixed mode.
-    每次处理一项领取，并在固定回复模式下支持文档中的退款检查请求。
+    """Process one claim, including documented order and ticket requests in fixed mode.
+    每次处理一项领取，并在固定回复模式下支持文档中的订单和工单查询。
     """
     claim = claim_job(owner, lease_seconds, max_attempts)
     if not claim:
