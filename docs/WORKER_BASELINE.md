@@ -101,4 +101,8 @@ Sign in as `alice` and send `Look up ticket 391` or `查询工单 391`. The repl
 
 The seed command can be repeated. It preserves existing order facts and ticket status and rejects conflicting ownership or links. A successful linked-order lookup saves its eligibility result with the chat reply and job success. Ticket lookup leaves business records unchanged.
 
-Approval and simulated business writes follow this milestone. See the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md).
+## Prepare a refund proposal
+
+With the same fixed-mode demo data, send `Prepare a refund for ticket 391` or `处理工单 391`. The worker checks the ticket, linked order, and refund policy, then saves a **Waiting for approval** card with the amount, proposed customer reply, and proposed ticket status. Refresh the page, sign in again, and open the saved conversation to see the same proposal. Ticket `392` returns the expired-window explanation and ticket `393` reports the missing delivery date.
+
+The conversation history API returns the proposal on its originating message. The planning job finishes when it saves the proposal, and the execution remains waiting for approval. Approval decisions and simulated business writes follow this milestone. See the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md).

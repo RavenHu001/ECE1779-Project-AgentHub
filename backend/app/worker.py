@@ -13,19 +13,13 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import aliased
 
 from app.config import positive_number
 from app.db import SessionLocal
-from app.models import Conversation, Execution, Job, Message, Order
-from app.refund_eligibility import (
-    POLICY_VERSION,
-    evaluate_refund_eligibility,
-    format_refund_reply,
-    parse_refund_order_id,
-)
+from app.models import Conversation, Job, Message
 from app.replies import FixedReply, ReplySettings, RetryableReplyError, build_reply_provider
-from app.ticket_lookup import lookup_ticket, parse_ticket_id
+from app.support_workflow import check_demo_refund_request, parse_prepare_refund, prepare_refund
 
 log = logging.getLogger(__name__)
 
@@ -245,53 +239,11 @@ def retry_job(claim: Claim, *, max_attempts):
         clear_lease(job)
 
 
-def check_demo_refund_request(session: Session, source: Message, user_id: UUID) -> str | None:
-    """Resolve a fixed-mode order or ticket request and stage its eligibility result.
-    处理固定模式下的订单或工单请求，并将资格结果加入当前事务。
-    """
-    # Resolve the ticket and order as the owner of the saved conversation.
-    # 使用已保存会话的所有者身份查询工单与订单。
-    ticket_id = parse_ticket_id(source.content)
-    prefix = ""
-    if ticket_id is not None:
-        match = lookup_ticket(session, user_id, ticket_id)
-        if match is None:
-            return "Ticket not found."
-        status, order = match
-        prefix = f"Ticket {ticket_id} is {status.lower()}. "
-        if order is None:
-            return prefix + "More information is required. No accessible order is linked to this ticket."
-        order_id = order.id
-    else:
-        order_id = parse_refund_order_id(source.content)
-        if order_id is None:
-            return None
-        order = session.scalar(select(Order).where(Order.id == order_id, Order.assigned_user_id == user_id))
-
-    # Both paths use the same policy, check time, and order eligibility record.
-    # 两条路径共用同一退款规则、检查时刻和订单资格记录。
-    checked_at = session.scalar(select(func.clock_timestamp()))
-    result = evaluate_refund_eligibility(order, checked_at)
-    session.add(
-        Execution(
-            source_message_id=source.id,
-            requested_order_id=order_id,
-            outcome=result.outcome,
-            reason_codes=list(result.reason_codes),
-            refund_amount_minor=result.refund_amount_minor,
-            currency=result.currency,
-            policy_version=POLICY_VERSION,
-            checked_at=checked_at,
-        )
-    )
-    return prefix + format_refund_reply(order_id, result)
-
-
 # Commit the result and completion together, rechecking ownership before success.
 # 一起提交处理结果与完成状态，在标记成功前再次核对领取权。
 def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = False):
-    """Commit one reply, any order eligibility result, and job success under the same claim.
-    在同一次有效领取下提交唯一回复、订单资格结果和任务成功状态。
+    """Commit the reply or pending proposal together with the fenced job result.
+    在同一次有效领取下提交回复或待审批方案，以及待办结果。
     """
     # Lock the current job and load the source of the reply before staging writes.
     # 在准备写入前锁定当前待办，并读取回复对应的来源消息。
@@ -309,20 +261,32 @@ def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = Fals
         conversation = session.scalar(
             select(Conversation).where(Conversation.id == source.conversation_id).with_for_update()
         )
-        # Stage the eligibility result and the reply together inside the fenced transaction.
-        # 在受领取权保护的同一事务中准备资格记录和回复。
+        # Route the fixed-mode request through the same structured action used for proposal staging.
+        # 固定模式通过同一结构化动作入口进入方案准备流程。
+        final_reply = reply
         if check_refund_requests:
-            reply = check_demo_refund_request(session, source, conversation.user_id) or reply
-        session.add(
-            Message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=reply,
-                seq=conversation.next_message_seq,
-                reply_to_message_id=source.id,
+            action = parse_prepare_refund(source.content)
+            if action is not None:
+                final_reply = prepare_refund(session, source.id, conversation.user_id, action)
+            else:
+                final_reply = (
+                    check_demo_refund_request(session, source.id, source.content, conversation.user_id)
+                    or reply
+                )
+
+        # A proposal appears on its source message and leaves the final reply slot available.
+        # 方案显示在来源消息下，并保留最终回复的位置。
+        if final_reply is not None:
+            session.add(
+                Message(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=final_reply,
+                    seq=conversation.next_message_seq,
+                    reply_to_message_id=source.id,
+                )
             )
-        )
-        conversation.next_message_seq += 1
+            conversation.next_message_seq += 1
         conversation.updated_at = func.clock_timestamp()
         session.flush()
         # Recheck live time after lock waits so an expired claim rolls back all its writes.
@@ -342,8 +306,8 @@ def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = Fals
             .execution_options(synchronize_session=False)
         ).rowcount
         if changed != 1:
-            # Raising here also rolls back the check result, reply and conversation sequence.
-            # 此处抛出异常，也会回滚检查结果、回复及会话顺序号。
+            # Raising here also rolls back the check result, proposal, reply and sequence.
+            # 此处抛出异常，也会回滚资格记录、方案、回复及会话顺序号。
             raise LostLease()
 
 
@@ -380,8 +344,8 @@ def run_once(
     provider=None,
     settings=None,
 ) -> bool:
-    """Process one claim, including documented order and ticket requests in fixed mode.
-    每次处理一项领取，并在固定回复模式下支持文档中的订单和工单查询。
+    """Process one claim, including documented queries and proposal requests in fixed mode.
+    每次处理一项领取，并在固定回复模式下支持文档中的查询与方案请求。
     """
     claim = claim_job(owner, lease_seconds, max_attempts)
     if not claim:

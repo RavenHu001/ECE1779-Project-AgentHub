@@ -51,6 +51,26 @@ class MessageCreate(BaseModel):
         return value
 
 
+# Expose the persisted proposal without the internal order snapshot used for later checks.
+# 返回已保存的方案，隐藏供后续核验使用的内部订单快照。
+class ProposalOut(BaseModel):
+    id: UUID
+    version: Literal[1]
+    status: Literal["WAITING_FOR_APPROVAL"]
+    # Serialize BIGINT identifiers and amounts as strings so browsers preserve every digit.
+    # 将 BIGINT 编号和金额序列化为字符串，避免浏览器丢失精度。
+    ticket_id: str
+    order_id: str
+    refund_amount_minor: str
+    currency: Literal["CAD"]
+    customer_reply: str
+    proposed_ticket_status: Literal["RESOLVED"]
+    policy_version: str
+    delivered_at: datetime
+    checked_at: datetime
+    expires_at: datetime
+
+
 # Return saved chat text and its relationship to the originating request.
 # 返回已保存的聊天文本，以及与原始请求的关联。
 class MessageOut(BaseModel):
@@ -62,6 +82,7 @@ class MessageOut(BaseModel):
     seq: int
     reply_to_message_id: UUID | None
     created_at: datetime
+    proposal: ProposalOut | None = None
 
 
 # Return stable identifiers for both a new submission and its retries.

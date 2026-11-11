@@ -136,6 +136,17 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .message.user>strong { display: none; }
 .message.user p { background: var(--bubble); padding: 11px 17px; border-radius: 17px; line-height: 1.65; max-width: 100%; }
 .message.assistant { padding: 0 4px; }
+/* Keep the proposal in the message flow and allow long drafts and amounts to wrap.
+   方案卡片与消息一起滚动，允许较长的草稿和金额自然换行。 */
+.proposal-card { margin: -12px 0 32px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--input); line-height: 1.55; overflow-wrap: anywhere; }
+.proposal-card h3 { margin: 0 0 4px; font-size: 15px; }
+.proposal-state { color: var(--secondary); font-size: 13px; font-weight: 600; }
+.proposal-card dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 14px; margin: 14px 0; font-size: 13px; }
+.proposal-card dt, .proposal-expiry { color: var(--muted); }
+.proposal-card dd { margin: 0; }
+.proposal-card h4 { margin: 0 0 4px; font-size: 13px; }
+.proposal-card blockquote { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bubble); font-size: 13px; white-space: pre-wrap; }
+.proposal-expiry { margin: 10px 0 0; font-size: 12px; }
 .pending-message { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--muted); padding: 4px 0 24px; }
 .notice { font-size: 12px; color: var(--error); line-height: 1.6; margin: 12px 2px; white-space: pre-wrap; }
 /* Footer and collapsed navigation keep their controls reachable when the sidebar is hidden.

@@ -77,8 +77,55 @@ function status(text = "", working = false) {
   $("job-status").classList.toggle("working", working);
 }
 
-/** Replace message nodes with plain text and scroll to the newest visible reply.
- * 以纯文本替换消息节点，并滚动到最新的可见回复，避免把用户或模型文本当作 HTML。
+/** Render the saved refund proposal using plain text and its persistent identity.
+ * 使用纯文本和持久化标识渲染已保存的退款方案。
+ */
+function renderProposal(proposal) {
+  const card = document.createElement("article");
+  card.className = "proposal-card";
+  card.setAttribute("data-proposal-id", proposal.id);
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Refund proposal";
+  const state = document.createElement("span");
+  state.className = "proposal-state";
+  state.textContent = "Waiting for approval";
+
+  // Split the decimal digits without converting BIGINT cents to a JavaScript number.
+  // 直接拆分十进制数字，避免将 BIGINT 金额转换成 JavaScript 浮点数。
+  const digits = proposal.refund_amount_minor.padStart(3, "0");
+  const amount = proposal.currency + " " + digits.slice(0, -2) + "." + digits.slice(-2);
+  const details = document.createElement("dl");
+  for (const [name, value] of [
+    ["Ticket", "#" + proposal.ticket_id],
+    ["Order", "#" + proposal.order_id],
+    ["Simulated refund", amount],
+    ["Order delivered", new Date(proposal.delivered_at).toLocaleDateString()],
+    ["Refund policy", proposal.policy_version],
+    ["Proposed ticket status", proposal.proposed_ticket_status === "RESOLVED" ? "Resolved" : proposal.proposed_ticket_status],
+  ]) {
+    const label = document.createElement("dt");
+    label.textContent = name;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    details.append(label, description);
+  }
+
+  // Render the exact saved draft as text, even when its contents look like markup.
+  // 原样以纯文本显示已保存的草稿，即使其中的内容看起来像 HTML。
+  const draftLabel = document.createElement("h4");
+  draftLabel.textContent = "Proposed customer reply";
+  const draft = document.createElement("blockquote");
+  draft.textContent = proposal.customer_reply;
+  const expiry = document.createElement("p");
+  expiry.className = "proposal-expiry";
+  expiry.textContent = "Approval window ends " + new Date(proposal.expires_at).toLocaleString();
+  card.append(heading, state, details, draftLabel, draft, expiry);
+  return card;
+}
+
+/** Replace history with plain text messages and any proposals attached to their sources.
+ * 以纯文本消息及其来源消息所附带的方案重建历史。
  */
 function showMessages(rows, waiting = false) {
   $("chat").classList.toggle("has-messages", rows.length > 0 || waiting);
@@ -94,6 +141,9 @@ function showMessages(rows, waiting = false) {
     text.textContent = row.content;
     article.append(label, text);
     $("messages").append(article);
+    // Rebuild cards from the same history snapshot as their originating messages.
+    // 方案卡片和来源消息使用同一份历史快照进行重建。
+    if (row.proposal) $("messages").append(renderProposal(row.proposal));
   }
   if (waiting) {
     // The waiting row is local presentation state, never a persisted assistant message.

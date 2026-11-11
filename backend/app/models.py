@@ -251,6 +251,10 @@ class Execution(Base):
             name="ck_executions_refund_amount",
         ),
         CheckConstraint("outcome <> 'NOT_FOUND' OR currency IS NULL", name="ck_executions_not_found"),
+        CheckConstraint(
+            "status = 'COMPLETED' OR (status = 'WAITING_FOR_APPROVAL' AND outcome = 'ELIGIBLE')",
+            name="ck_executions_status",
+        ),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     source_message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id", ondelete="RESTRICT"))
@@ -264,3 +268,28 @@ class Execution(Base):
     currency: Mapped[str | None] = mapped_column(Text)
     policy_version: Mapped[str] = mapped_column(Text)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'COMPLETED'"))
+
+
+# A frozen refund proposal linked to its supporting eligibility result.
+# 一份与退款资格记录关联的固定退款方案。
+class ResolutionProposal(Base):
+    __tablename__ = "resolution_proposals"
+    __table_args__ = (
+        UniqueConstraint("execution_id", name="uq_resolution_proposals_execution"),
+        CheckConstraint("customer_reply ~ '[^[:space:]]'", name="ck_resolution_proposals_reply"),
+        CheckConstraint("proposed_ticket_status = 'RESOLVED'", name="ck_resolution_proposals_ticket_status"),
+        CheckConstraint(
+            "jsonb_typeof(expected_order_facts) = 'object'", name="ck_resolution_proposals_facts"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    execution_id: Mapped[UUID] = mapped_column(ForeignKey("executions.id", ondelete="RESTRICT"))
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="RESTRICT"))
+    customer_reply: Mapped[str] = mapped_column(Text)
+    proposed_ticket_status: Mapped[str] = mapped_column(Text)
+    # Keep the facts used for eligibility so execution can later detect stale proposals.
+    # 保存资格判断所用的事实，供后续执行时识别过时方案。
+    expected_order_facts: Mapped[dict] = mapped_column(JSONB)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

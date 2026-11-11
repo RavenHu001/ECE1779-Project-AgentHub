@@ -248,3 +248,30 @@ async function delayedHistory({ reject = false, fullPage = false } = {}) {
 test("old history cannot overwrite a newly saved reply", () => delayedHistory());
 test("old history failures do not replace a newer successful state", () => delayedHistory({ reject: true }));
 test("superseded history does not fetch additional stale pages", () => delayedHistory({ fullPage: true }));
+
+test("saved proposal restores after a new page loads the same chat", async () => {
+  const conversation = { id: "proposal-chat", title: "Ticket 391" };
+  const proposal = {
+    id: "saved-proposal", status: "WAITING_FOR_APPROVAL", ticket_id: "391", order_id: "1001",
+    refund_amount_minor: "9223372036854775807", currency: "CAD", proposed_ticket_status: "RESOLVED",
+    delivered_at: "2026-11-06T12:00:00Z", expires_at: "2026-11-12T12:00:00Z", policy_version: "DEMO-CAD-30D/v1",
+    customer_reply: "<img src=x> 感谢您的耐心。",
+  };
+  // Both pages load the same saved response from the server.
+  // 两个页面均从服务端读取相同的已保存历史。
+  const rows = [{ seq: 1, role: "user", content: "Prepare a refund for ticket 391", proposal }];
+  for (let page = 0; page < 2; page++) {
+    const client = createClient(url => {
+      assert.match(url, /^\/conversations\/proposal-chat\/messages\?/);
+      return response(rows);
+    });
+    await client.run("authorization = 'Basic demo'; openConversation(" + JSON.stringify(conversation) + ")");
+    const [, card] = client.element("messages").children;
+    assert.equal(client.element("messages").children.length, 2);
+    assert.equal(card.attributes.get("data-proposal-id"), proposal.id);
+    assert.equal(card.children[1].textContent, "Waiting for approval");
+    assert.equal(card.children[2].children[5].textContent, "CAD 92233720368547758.07");
+    assert.equal(card.children[4].textContent, proposal.customer_reply);
+    assert.equal(card.children[4].children.length, 0);
+  }
+});

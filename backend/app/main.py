@@ -14,8 +14,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db import engine, get_session
-from app.models import Conversation, Job, Message, User
-from app.schemas import ConversationCreate, ConversationOut, JobOut, MessageCreate, MessageOut, SubmissionOut
+from app.models import Conversation, Execution, Job, Message, ResolutionProposal, User
+from app.schemas import (
+    ConversationCreate,
+    ConversationOut,
+    JobOut,
+    MessageCreate,
+    MessageOut,
+    ProposalOut,
+    SubmissionOut,
+)
 from app.security import current_user
 
 app = FastAPI(
@@ -176,7 +184,8 @@ def submit_message(
 @app.get(
     "/conversations/{conversation_id}/messages",
     response_model=list[MessageOut],
-    description="Read your conversation's messages in sequence order. Use after_seq and limit for pagination.",
+    response_model_exclude_unset=True,
+    description="Read your conversation's messages and any attached proposals. Use after_seq and limit for pagination.",
 )
 def list_messages(
     conversation_id: UUID,
@@ -185,22 +194,47 @@ def list_messages(
     user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
-    """Check ownership before reading ordered pages after an exclusive sequence cursor.
-    先确认会话属于当前账号，再分页读取顺序号严格大于游标的消息。
+    """Read owned message pages with proposals attached to their source messages.
+    分页读取当前账号的消息，并在来源消息上附带对应的方案。
     """
     conversation = session.scalar(
         select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user.id)
     )
     if not conversation:
         raise HTTPException(404, "Conversation not found")
-    # Sequence pagination lets clients read complete history without one unbounded query.
-    # 顺序号分页允许客户端读取完整历史，同时避免一次无上限查询返回过多记录。
-    return session.scalars(
-        select(Message)
+    # Read proposals with their messages in one snapshot. Both joins are one-to-one.
+    # 在同一快照中读取消息与方案，两次连接均为一对一。
+    rows = session.execute(
+        select(Message, Execution, ResolutionProposal)
+        .outerjoin(Execution, Execution.source_message_id == Message.id)
+        .outerjoin(ResolutionProposal, ResolutionProposal.execution_id == Execution.id)
         .where(Message.conversation_id == conversation_id, Message.seq > after_seq)
         .order_by(Message.seq)
         .limit(limit)
-    ).all()
+    )
+    history = []
+    for message, execution, proposal in rows:
+        result = MessageOut.model_validate(message)
+        # Keep ordinary history in its original shape and expose only public proposal fields.
+        # 保留普通历史原有的结构，并只返回方案的公开字段。
+        if proposal is not None:
+            result.proposal = ProposalOut(
+                id=proposal.id,
+                version=1,
+                status=execution.status,
+                ticket_id=str(proposal.ticket_id),
+                order_id=str(execution.requested_order_id),
+                refund_amount_minor=str(execution.refund_amount_minor),
+                currency=execution.currency,
+                customer_reply=proposal.customer_reply,
+                proposed_ticket_status=proposal.proposed_ticket_status,
+                policy_version=execution.policy_version,
+                delivered_at=proposal.expected_order_facts["delivered_at"],
+                checked_at=execution.checked_at,
+                expires_at=proposal.expires_at,
+            )
+        history.append(result)
+    return history
 
 
 # Follow the source message to enforce conversation ownership.

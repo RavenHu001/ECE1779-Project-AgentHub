@@ -4,20 +4,22 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from pydantic import ValidationError
 from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.db import SessionLocal, engine
 from app.manage import save_user, seed_demo_orders
-from app.models import Base, Conversation, Execution, Job, Message, Order, Ticket, User
+from app.models import Base, Conversation, Execution, Job, Message, Order, ResolutionProposal, Ticket, User
 from app.refund_eligibility import evaluate_refund_eligibility, parse_refund_order_id
+from app.support_workflow import PrepareRefund, prepare_refund
 from app.ticket_lookup import parse_ticket_id
 from app.worker import LostLease, claim_job, complete_job, run_once
 
@@ -281,10 +283,99 @@ def test_ticket_seed_preserves_status_and_rejects_relinking(accounts):
         assert session.get(Ticket, 391).order_id == 1002
 
 
-@pytest.mark.parametrize("content", ["Can order 1001 be refunded?", "Look up ticket 391"])
-def test_refund_completion_rejects_stale_claim_and_rolls_back(client, content):
-    """Keep the execution and reply atomic across worker takeover and a failed update.
-    验证 worker 接管或最终更新失败时，资格记录和回复仍保持事务一致。
+def test_pending_proposal_restores_from_history(client):
+    """Persist one proposal on its source message and protect it with conversation ownership.
+    在来源消息上保存唯一方案，并通过会话归属保护读取权限。
+    """
+    seed_demo_orders("alice", "bob", with_tickets=True)
+    conversation, payload, receipt = submit(client, content="处理工单 391，符合条件就准备退款")
+    path = f"/conversations/{conversation}/messages"
+    assert "proposal" not in client.get(path).json()[0]
+    assert run_once("proposal-worker")
+
+    # Re-read using an independent database connection, as a fresh page would.
+    # 通过独立数据库连接重新读取，模拟新页面恢复会话。
+    messages = client.get(path).json()
+    assert len(messages) == 1
+    assert messages[0]["id"] == receipt["message_id"]
+    proposal = messages[0]["proposal"]
+    engine.dispose()
+    assert client.get(path).json() == messages
+    assert client.post(path, json=payload).json() == receipt
+    assert not run_once("proposal-worker")
+    assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "SUCCEEDED"
+    assert client.get(path, auth=("bob", "bob-test-password")).status_code == 404
+
+    assert proposal["status"] == "WAITING_FOR_APPROVAL"
+    assert (proposal["ticket_id"], proposal["order_id"], proposal["refund_amount_minor"]) == (
+        "391",
+        "1001",
+        "12999",
+    )
+    assert proposal["customer_reply"] == "Your order is eligible for a refund of CAD 129.99."
+    assert "expected_order_facts" not in proposal
+    with SessionLocal() as session:
+        saved = session.scalars(select(ResolutionProposal)).one()
+        assert str(saved.id) == proposal["id"]
+        assert saved.expires_at == session.get(Execution, saved.execution_id).checked_at + timedelta(days=1)
+        assert session.get(Ticket, 391).status == "OPEN"
+        assert session.get(Order, 1001).paid_total_minor == 12999
+
+    # A completed planning job must release the worker for a different conversation.
+    # 方案准备待办完成后，worker 必须可以处理另一会话。
+    other, _, _ = submit(client, content="Hello")
+    assert run_once("proposal-worker")
+    assert client.get(f"/conversations/{other}/messages").json()[-1]["content"] == "Message received."
+
+
+@pytest.mark.parametrize(
+    "ticket_id, reply_text",
+    [(392, "window has expired"), (393, "delivery date is missing"), (395, "Ticket not found.")],
+)
+def test_prepare_refund_without_eligible_ticket_returns_reply(client, ticket_id, reply_text):
+    """Return a safe explanation and leave no proposal when the request is blocked.
+    请求无法继续时返回安全的原因说明，并且不创建方案。
+    """
+    seed_demo_orders("alice", "bob", with_tickets=True)
+    conversation, _, _ = submit(client, content=f"Prepare a refund for ticket {ticket_id}")
+    assert run_once("proposal-worker")
+    rows = client.get(f"/conversations/{conversation}/messages").json()
+    assert reply_text in rows[-1]["content"]
+    assert all("proposal" not in row for row in rows)
+    with SessionLocal() as session:
+        assert session.scalars(select(ResolutionProposal)).first() is None
+
+
+def test_structured_refund_action_preserves_agent_draft_and_uses_order_amount(client, accounts):
+    """Exercise the same proposal handler with a validated structured draft.
+    使用已校验的结构化草稿测试同一方案处理入口。
+    """
+    seed_demo_orders("alice", "bob", with_tickets=True)
+    _, _, receipt = submit(client, content="Agent draft")
+    draft = "  Your refund is eligible.\n感谢您的耐心。"
+    action = PrepareRefund(ticket_id=391, customer_reply=draft)
+    # Model-supplied facts must fail validation rather than override the policy calculation.
+    # 模型提供的业务事实必须校验失败，不能覆盖后端政策计算。
+    with pytest.raises(ValidationError):
+        PrepareRefund.model_validate({"ticket_id": 391, "refund_amount_minor": 1})
+    with SessionLocal.begin() as session:
+        assert prepare_refund(session, UUID(receipt["message_id"]), accounts[0], action) is None
+    with SessionLocal() as session:
+        assert session.scalars(select(ResolutionProposal)).one().customer_reply == draft
+        assert session.scalars(select(Execution)).one().refund_amount_minor == 12999
+
+
+@pytest.mark.parametrize(
+    "content, has_proposal",
+    [
+        ("Can order 1001 be refunded?", False),
+        ("Look up ticket 391", False),
+        ("Prepare a refund for ticket 391", True),
+    ],
+)
+def test_refund_completion_rejects_stale_claim_and_rolls_back(client, content, has_proposal):
+    """Keep the eligibility result, reply or proposal atomic across takeover and failure.
+    验证接管或失败时，资格记录、回复或方案仍保持事务一致。
     """
     seed_demo_orders("alice", "bob", with_tickets=True)
     conversation, _, receipt = submit(client, content=content)
@@ -311,6 +402,7 @@ def test_refund_completion_rejects_stale_claim_and_rolls_back(client, content):
 
     with SessionLocal() as session:
         assert session.scalar(select(func.count()).select_from(Execution)) == 0
+        assert session.scalar(select(func.count()).select_from(ResolutionProposal)) == 0
         assert session.get(Conversation, conversation).next_message_seq == 2
     assert len(client.get(f"/conversations/{conversation}/messages").json()) == 1
     assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "RUNNING"
@@ -318,7 +410,10 @@ def test_refund_completion_rejects_stale_claim_and_rolls_back(client, content):
     complete_job(new, "Message received.", check_refund_requests=True)
     with SessionLocal() as session:
         assert session.scalar(select(func.count()).select_from(Execution)) == 1
-    assert len(client.get(f"/conversations/{conversation}/messages").json()) == 2
+        assert session.scalar(select(func.count()).select_from(ResolutionProposal)) == int(has_proposal)
+    messages = client.get(f"/conversations/{conversation}/messages").json()
+    assert len(messages) == (1 if has_proposal else 2)
+    assert ("proposal" in messages[0]) == has_proposal
     assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "SUCCEEDED"
 
 

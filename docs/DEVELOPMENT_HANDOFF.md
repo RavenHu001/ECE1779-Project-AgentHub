@@ -81,7 +81,7 @@ The proposed course demo is a single support and refund triage workflow with syn
 
 The [read-only refund check](WORKER_BASELINE.md#read-only-refund-check) evaluates one simulated order and persists the conclusion alongside the chat reply. Ticket lookup and approved resolutions follow the order check.
 
-The [read-only ticket lookup](WORKER_BASELINE.md#read-only-ticket-lookup) resolves a ticket and its linked order for the signed-in account. Approval, SSE, cloud orchestration, deployment monitoring and automated backups remain planned. The [original architecture handover](AGENTHUB_TEAM_HANDOVER.md) explains the rationale and alternatives. Its React and cloud diagrams describe proposals. Use current code and team decisions to resolve differences.
+The [read-only ticket lookup](WORKER_BASELINE.md#read-only-ticket-lookup) resolves a ticket and its linked order for the signed-in account. Fixed mode can also [prepare a refund proposal](WORKER_BASELINE.md#prepare-a-refund-proposal) that reappears when the user reopens the saved conversation. Approval decisions, simulated business writes, SSE, cloud orchestration, deployment monitoring and automated backups remain planned. The [original architecture handover](AGENTHUB_TEAM_HANDOVER.md) explains the rationale and alternatives. Its React and cloud diagrams describe proposals. Use current code and team decisions to resolve differences.
 
 For a fresh Codex chat, a useful starting prompt is:
 
