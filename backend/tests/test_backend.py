@@ -2,7 +2,7 @@
 # 验证接口行为、访问归属、事务写入和 worker 恢复。
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +15,9 @@ from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.db import SessionLocal, engine
-from app.models import Base, Conversation, Job, Message, User
+from app.manage import save_user, seed_demo_orders
+from app.models import Base, Conversation, Execution, Job, Message, Order, User
+from app.refund_eligibility import evaluate_refund_eligibility, parse_refund_order_id
 from app.worker import LostLease, claim_job, complete_job, run_once
 
 
@@ -43,7 +45,23 @@ def test_health_and_authentication(client):
     assert client.get("/conversations").status_code == 401
 
 
+def test_development_account_accepts_one_character_password(client):
+    """Allow single-character passwords when creating and resetting a development account.
+    验证开发账号创建和重置密码时均可使用一个字符的密码。
+    """
+    save_user("short-password", "1")
+    assert client.get("/me", auth=("short-password", "1")).status_code == 200
+    save_user("short-password", "2", reset=True)
+    assert client.get("/me", auth=("short-password", "1")).status_code == 401
+    assert client.get("/me", auth=("short-password", "2")).status_code == 200
+    with pytest.raises(ValueError, match="non-empty"):
+        save_user("short-password", "", reset=True)
+
+
 def test_fixed_reply_pipeline_and_pagination(client):
+    """Keep ordinary fixed chat on its original path without a business result.
+    验证普通固定回复沿用原流程，不生成业务执行记录。
+    """
     conversation, _, receipt = submit(client)
     assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "QUEUED"
     assert run_once("test-worker")
@@ -54,6 +72,164 @@ def test_fixed_reply_pipeline_and_pagination(client):
     assert messages[1]["content"] == "Message received."
     assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "SUCCEEDED"
     assert len(client.get(f"/conversations/{conversation}/messages?after_seq=1&limit=1").json()) == 1
+    with SessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(Execution)) == 0
+
+
+@pytest.mark.parametrize(
+    "content, order_id, outcome, reasons, amount, reply",
+    [
+        (
+            "  订单 1001 能退款吗？  ",
+            1001,
+            "ELIGIBLE",
+            [],
+            12999,
+            "Order 1001 is eligible for a simulated refund of CAD 129.99.",
+        ),
+        (
+            "Can order 1002 be refunded?",
+            1002,
+            "INELIGIBLE",
+            ["WINDOW_EXPIRED"],
+            None,
+            "Order 1002 is not eligible for a simulated refund. The 30-day refund window has expired.",
+        ),
+        (
+            "Can order 1003 be refunded?",
+            1003,
+            "NEEDS_INFORMATION",
+            ["MISSING_DELIVERED_AT"],
+            None,
+            "More information is required to check order 1003. The delivery date is missing.",
+        ),
+        ("Can order 1005 be refunded?", 1005, "NOT_FOUND", ["ORDER_NOT_FOUND"], None, "Order not found."),
+        ("Can order 9000 be refunded?", 9000, "NOT_FOUND", ["ORDER_NOT_FOUND"], None, "Order not found."),
+    ],
+)
+def test_refund_check_via_message(client, content, order_id, outcome, reasons, amount, reply):
+    """Verify the saved result, reply, owner isolation and duplicate receipt through normal routes.
+    通过正常接口验证持久化结果、回复、归属隔离和重复提交回执。
+    """
+    seed_demo_orders("alice", "bob")
+    conversation, payload, receipt = submit(client, content=content)
+    assert run_once("refund-worker")
+    messages_url = f"/conversations/{conversation}/messages"
+    assert client.post(messages_url, json=payload).json() == receipt
+    assert not run_once("refund-worker")
+    assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "SUCCEEDED"
+    messages = client.get(messages_url).json()
+    assert [message["content"] for message in messages] == [content, reply]
+    assert messages[1]["reply_to_message_id"] == receipt["message_id"]
+    with SessionLocal() as session:
+        execution = session.scalars(select(Execution)).one()
+        assert str(execution.source_message_id) == receipt["message_id"]
+        assert execution.requested_order_id == order_id
+        assert execution.outcome == outcome
+        assert execution.reason_codes == reasons
+        assert execution.refund_amount_minor == amount
+        assert execution.currency == (None if outcome == "NOT_FOUND" else "CAD")
+        assert execution.policy_version == "DEMO-CAD-30D/v1"
+
+
+@pytest.mark.parametrize(
+    "age, outcome, reasons",
+    [
+        (timedelta(days=30), "ELIGIBLE", ()),
+        (timedelta(days=30, seconds=1), "INELIGIBLE", ("WINDOW_EXPIRED",)),
+        (timedelta(seconds=-1), "NEEDS_INFORMATION", ("INVALID_DELIVERED_AT",)),
+    ],
+)
+def test_refund_window_uses_utc_instants(age, outcome, reasons):
+    """Check the inclusive cutoff and reject a delivery time in the future.
+    验证退款截止时刻包含边界，并拒绝将来的交付时间。
+    """
+    checked_at = datetime(2026, 11, 8, 16, tzinfo=UTC)
+    order = Order(
+        payment_status="PAID",
+        fulfillment_status="DELIVERED",
+        paid_total_minor=12999,
+        currency="CAD",
+        delivered_at=checked_at - age,
+    )
+    result = evaluate_refund_eligibility(order, checked_at)
+    assert (result.outcome, result.reason_codes) == (outcome, reasons)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Can order 0 be refunded?",
+        "Can order 9223372036854775808 be refunded?",
+        "订单 １００１ 能退款吗？",
+        "Quote this: Can order 1001 be refunded?",
+    ],
+)
+def test_refund_request_requires_a_complete_valid_order_number(content):
+    """Keep unrelated text and invalid identifiers on the normal chat path.
+    将无关文本和无效编号留在普通聊天流程。
+    """
+    assert parse_refund_order_id(content) is None
+
+
+def test_refund_completion_rejects_stale_claim_and_rolls_back(client):
+    """Keep the execution and reply atomic across worker takeover and a failed update.
+    验证 worker 接管或最终更新失败时，资格记录和回复仍保持事务一致。
+    """
+    seed_demo_orders("alice", "bob")
+    conversation, _, receipt = submit(client, content="Can order 1001 be refunded?")
+    old = claim_job("old-refund-worker")
+    expire(old.job_id)
+    new = claim_job("new-refund-worker")
+    assert new.job_id == old.job_id and new.token != old.token
+    with pytest.raises(LostLease):
+        complete_job(old, "Message received.", check_refund_requests=True)
+
+    def fail_final_update(_conn, _cursor, statement, _parameters, _context, _executemany):
+        """Inject a failure after the result and reply have been flushed.
+        在结果与回复已经写入事务后模拟最终更新失败。
+        """
+        if statement.startswith("UPDATE jobs"):
+            raise SQLAlchemyError("simulated refund completion failure")
+
+    event.listen(engine, "before_cursor_execute", fail_final_update)
+    try:
+        with pytest.raises(SQLAlchemyError):
+            complete_job(new, "Message received.", check_refund_requests=True)
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_final_update)
+
+    with SessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(Execution)) == 0
+        assert session.get(Conversation, conversation).next_message_seq == 2
+    assert len(client.get(f"/conversations/{conversation}/messages").json()) == 1
+    assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "RUNNING"
+
+    complete_job(new, "Message received.", check_refund_requests=True)
+    with SessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(Execution)) == 1
+    assert len(client.get(f"/conversations/{conversation}/messages").json()) == 2
+    assert client.get(f"/jobs/{receipt['job_id']}").json()["status"] == "SUCCEEDED"
+
+
+def test_demo_seed_preserves_saved_facts_and_rejects_reassignment(accounts):
+    """Allow repeated demo setup while protecting existing ownership and order facts.
+    允许重复初始化演示数据，同时保护已有订单归属和内容。
+    """
+    seed_demo_orders("alice", "bob")
+    with SessionLocal.begin() as session:
+        order = session.get(Order, 1001)
+        delivered_at = order.delivered_at
+        order.paid_total_minor = 13001
+    seed_demo_orders("alice", "bob")
+    with pytest.raises(ValueError, match="already belong to different accounts"):
+        seed_demo_orders("bob", "alice")
+    with SessionLocal() as session:
+        order = session.get(Order, 1001)
+        assert order.assigned_user_id == accounts[0]
+        assert order.paid_total_minor == 13001
+        assert order.delivered_at == delivered_at
+        assert session.scalar(select(func.count()).select_from(Order)) == 4
 
 
 # English system defaults must not translate or reject valid Unicode user input.

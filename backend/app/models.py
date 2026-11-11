@@ -1,5 +1,5 @@
-# Map the four initial tables and enforce their local consistency rules.
-# 映射起步阶段的四张表，并约束单条记录内部的一致性。
+# Map application and demo data, with database constraints for local consistency.
+# 映射应用与演示数据，并用数据库约束保证单条记录的一致性。
 
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -189,3 +190,60 @@ class Job(Base):
     # Ownership deadline checked using live database time.
     # 使用数据库实时时间检查的领取截止时间。
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# A synthetic order visible only to the assigned employee account.
+# 一笔仅对指派员工账号可见的模拟订单。
+class Order(Base):
+    __tablename__ = "orders"
+    __table_args__ = (
+        CheckConstraint("id > 0", name="ck_orders_id"),
+        CheckConstraint("payment_status IN ('PAID', 'UNPAID')", name="ck_orders_payment_status"),
+        CheckConstraint(
+            "fulfillment_status IN ('DELIVERED', 'NOT_DELIVERED')", name="ck_orders_fulfillment_status"
+        ),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    assigned_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+    # Nullable facts let demo orders represent incomplete records.
+    # 业务字段允许为空，以便模拟资料不完整的订单。
+    payment_status: Mapped[str | None] = mapped_column(Text)
+    fulfillment_status: Mapped[str | None] = mapped_column(Text)
+    paid_total_minor: Mapped[int | None] = mapped_column(BigInteger)
+    currency: Mapped[str | None] = mapped_column(Text)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# A durable eligibility result for one source message, separate from job scheduling.
+# 一条来源消息对应一份持久化资格结果，与待办调度状态分开保存。
+class Execution(Base):
+    __tablename__ = "executions"
+    __table_args__ = (
+        UniqueConstraint("source_message_id", name="uq_executions_source"),
+        CheckConstraint("requested_order_id > 0", name="ck_executions_requested_order"),
+        CheckConstraint(
+            "outcome IN ('ELIGIBLE', 'INELIGIBLE', 'NEEDS_INFORMATION', 'NOT_FOUND')",
+            name="ck_executions_outcome",
+        ),
+        CheckConstraint("jsonb_typeof(reason_codes) = 'array'", name="ck_executions_reasons"),
+        CheckConstraint(
+            "(outcome = 'ELIGIBLE' AND refund_amount_minor IS NOT NULL AND refund_amount_minor > 0 "
+            "AND currency IS NOT NULL AND currency = 'CAD') OR "
+            "(outcome <> 'ELIGIBLE' AND refund_amount_minor IS NULL)",
+            name="ck_executions_refund_amount",
+        ),
+        CheckConstraint("outcome <> 'NOT_FOUND' OR currency IS NULL", name="ck_executions_not_found"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    source_message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id", ondelete="RESTRICT"))
+
+    # Store the requested number even when no visible order matches it.
+    # 即使没有可见订单匹配，也记录用户请求中的编号。
+    requested_order_id: Mapped[int] = mapped_column(BigInteger)
+    outcome: Mapped[str] = mapped_column(Text)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB)
+    refund_amount_minor: Mapped[int | None] = mapped_column(BigInteger)
+    currency: Mapped[str | None] = mapped_column(Text)
+    policy_version: Mapped[str] = mapped_column(Text)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -1,6 +1,6 @@
 # Worker baseline
 
-This milestone extends the existing FastAPI/PostgreSQL backend with optional model-backed text chat. It reuses the existing tables, submission endpoints, job states, image and migration setup. No schema migration is required.
+The worker processes durable chat jobs with fixed replies or optional model text generation. Fixed mode also supports a read-only refund check backed by simulated orders in PostgreSQL.
 
 ## Run locally
 
@@ -12,7 +12,7 @@ powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1
 
 The script locates Docker even if this terminal has an old PATH, creates `.env` only if absent, builds and starts Compose, and checks the real API and independent worker. Host Python is not required. Open <http://127.0.0.1:8000/> (or the configured `API_PORT`) and sign in using the bootstrap credentials in `.env`. The browser test page supports saved conversations, job status, and replies. It is a lightweight development client; the team's main frontend can use the same API.
 
-Default `REPLY_MODE=fixed` returns `Message received.` and makes **no model requests**. The page clearly labels this mode. PostgreSQL stores messages and jobs on the existing persistent volume. Never use `docker compose down -v` on data you want to retain.
+Default `REPLY_MODE=fixed` returns `Message received.` for ordinary chat and makes **no model requests**. The page labels this mode as Demo mode. PostgreSQL stores messages and jobs on the existing persistent volume. Never use `docker compose down -v` on data you want to retain.
 
 ## Enable live model chat
 
@@ -30,7 +30,7 @@ MODEL_CONTEXT_CHARS=12000
 
 Then run `docker compose up -d --build --wait` to recreate the configured services. Never paste a key in chat, commit it, or print resolved Compose configuration in a shared log. The key is passed only to the worker container. Setting `openai` mode without a key fails worker startup; it does not silently switch to a simulated answer.
 
-The configured model must support the Responses API and `reasoning.effort=none`. Model selection stays configurable. In model mode, context has both a message-count limit and a character limit. An individual message exceeding the context character limit fails explicitly rather than silently truncating the request. Fixed mode does not load model context and preserves the API's 20,000-character message limit. The browser composer retains its 12,000-character limit for compatibility with the default model settings. The model sees the current message and recent earlier turns from that conversation only. No business tools, refunds, approvals, SSE or token streaming are implemented at this milestone. The system prompt explicitly forbids claiming business actions were performed.
+The configured model must support the Responses API and `reasoning.effort=none`. Model selection stays configurable. In model mode, context has both a message-count limit and a character limit. An individual message exceeding the context character limit fails explicitly rather than silently truncating the request. Fixed mode does not load model context and preserves the API's 20,000-character message limit. The browser composer retains its 12,000-character limit for compatibility with the default model settings. The model sees the current message and recent earlier turns from that conversation only. The refund demo runs in fixed mode using the application policy.
 
 These controls reduce spending but are **not a dollar-denominated spending cap**. Use the API account's billing controls as well. Do not run large workloads before reviewing usage. Recovered attempts may repeat a paid model request, although only the current claim can save its reply.
 
@@ -66,6 +66,27 @@ Tests use the existing isolated PostgreSQL test service. Added coverage exercise
 
 To exercise replication, start `docker compose up -d --scale worker=2 --wait` and repeat the smoke check. To verify persistence, record the conversation UUID printed by the smoke check, recreate containers without deleting volumes, and use `python -m app.smoke --verify-conversation UUID` inside the API container.
 
-## Next execution milestone
+## Read-only refund check
 
-Agree with the team on tool-result/checkpoint records and exact proposal/approval contracts before adding simulated ticket/order reads and approved resolutions. Preserve the existing shared migration process. Cloud deployment will reuse the backend image with distinct API and worker startup commands; Swarm/Fly.io orchestration, secrets and persistent storage configuration remain separate deployment work.
+Run the stack with `REPLY_MODE=fixed`. Create two active development accounts, for example `alice` and `bob`, using [the account commands](../README.md#individual-accounts). After migrations complete, seed the four demo orders.
+
+```bash
+docker compose run --rm admin seed-demo-orders alice bob
+```
+
+Sign in as `alice` and send `Can order 1001 be refunded?` or `订单 1001 能退款吗？`. The worker checks only orders assigned to that account. It saves the eligibility result, chat reply and job success in one transaction. The chat page displays the saved reply through the existing history endpoint.
+
+### Acceptance checks
+
+| Check as `alice` | Expected result after a fresh seed |
+| --- | --- |
+| Check order 1001, delivered five days ago | Eligible for 129.99 CAD |
+| Check order 1002, delivered 45 days ago | Ineligible because the window expired |
+| Check order 1003, missing its delivery time | More information required |
+| Check order 1005 as a different user | Same response as for a missing order |
+
+Use Docker Compose with fixed reply mode and the isolated PostgreSQL test database. Cover the exact 30-day boundary, ordinary chat, submission retries and worker lease expiry. A repeated submission or a replacement worker should leave one saved result and one reply for the source message. Verify that reopening the conversation displays the saved reply.
+
+See the [developer implementation guide](developer/zh-CN/AGENTHUB_READ_ONLY_REFUND_CHECK.md) for the data fields, request flow, worker transaction and tests.
+
+Ticket lookup, approval and simulated business writes follow this milestone. Use the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md) when designing the tool results, checkpoints, and approval and resume contracts for that work.

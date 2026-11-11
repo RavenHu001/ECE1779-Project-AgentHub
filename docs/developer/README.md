@@ -8,6 +8,7 @@ Chinese-language explanations for the team are grouped under `zh-CN/`. Reviewers
 | [Chinese code structure guide](zh-CN/CODE_STRUCTURE.md) | Source responsibilities and request processing explained in Chinese |
 | [Chinese technology stack guide](zh-CN/TECH_STACK.md) | Current technologies, versions, roles and selection rationale |
 | [Chinese manual testing guide](zh-CN/MANUAL_TESTING.md) | Manual cases and result records aligned with the English reviewer guide |
+| [Read-only refund eligibility implementation guide](zh-CN/AGENTHUB_READ_ONLY_REFUND_CHECK.md) | Order data, worker integration, result persistence and acceptance cases |
 | [Overall backend plan](zh-CN/AGENTHUB_BACKEND_PLAN.md) | Full proposed backend scope, including future cloud and business capabilities |
 | [Initial development plan](zh-CN/AGENTHUB_BACKEND_INITIAL_DEVELOPMENT_PLAN.md) | The first development milestone and its acceptance criteria |
 | [Initial database design](zh-CN/AGENTHUB_BACKEND_INITIAL_DATABASE_DESIGN.md) | Detailed explanation of the four initial tables |

@@ -287,15 +287,13 @@ $("login-form").addEventListener("submit", async event => {
   } finally { $("login-submit").disabled = false; }
 });
 
-// Closing by button, Escape, or backdrop cancels automatic submission and clears the password.
-// 通过按钮、Escape 或遮罩关闭登录框时，取消自动提交并清除密码输入。
-$("close-login").addEventListener("click", () => $("login-panel").close());
-$("login-panel").addEventListener("close", () => { resumeAfterLogin = false; $("password").value = ""; });
-$("login-panel").addEventListener("click", event => {
-  if (event.target !== $("login-panel")) return;
-  const rect = $("login-panel").getBoundingClientRect();
-  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)
-    $("login-panel").close();
+// Keep backdrop interactions separate from dismissal so selecting text cannot close the dialog.
+// 遮罩交互不负责关闭弹窗，避免拖选文字时误关闭。
+const loginPanel = $("login-panel");
+$("close-login").addEventListener("click", () => loginPanel.close());
+loginPanel.addEventListener("close", () => {
+  resumeAfterLogin = false;
+  $("password").value = "";
 });
 
 // Sign-out clears every account-scoped draft before returning to the unauthenticated workspace.

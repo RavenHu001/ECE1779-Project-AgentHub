@@ -17,7 +17,13 @@ from sqlalchemy.orm import aliased
 
 from app.config import positive_number
 from app.db import SessionLocal
-from app.models import Conversation, Job, Message
+from app.models import Conversation, Execution, Job, Message, Order
+from app.refund_eligibility import (
+    POLICY_VERSION,
+    evaluate_refund_eligibility,
+    format_refund_reply,
+    parse_refund_order_id,
+)
 from app.replies import FixedReply, ReplySettings, RetryableReplyError, build_reply_provider
 
 log = logging.getLogger(__name__)
@@ -238,11 +244,11 @@ def retry_job(claim: Claim, *, max_attempts):
         clear_lease(job)
 
 
-# Commit the reply and completion together, rechecking ownership before success.
-# 一起提交回复与完成状态，在标记成功前再次核对领取权。
-def complete_job(claim: Claim, reply: str):
-    """Commit one reply and job success together, fencing stale attempts twice.
-    在同一事务中提交唯一回复和成功状态，并在关键写入前后检查租约有效性。
+# Commit the result and completion together, rechecking ownership before success.
+# 一起提交处理结果与完成状态，在标记成功前再次核对领取权。
+def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = False):
+    """Commit one reply, any refund check, and job success under the same claim.
+    在同一次有效领取下提交唯一回复、退款检查结果和任务成功状态。
     """
     if not reply.strip():
         raise ValueError("Reply must not be blank")
@@ -258,6 +264,28 @@ def complete_job(claim: Claim, reply: str):
         conversation = session.scalar(
             select(Conversation).where(Conversation.id == source.conversation_id).with_for_update()
         )
+        # The order lookup uses the owner of the saved conversation.
+        # 订单查询使用已保存会话的所有者身份。
+        order_id = parse_refund_order_id(source.content) if check_refund_requests else None
+        if order_id is not None:
+            order = session.scalar(
+                select(Order).where(Order.id == order_id, Order.assigned_user_id == conversation.user_id)
+            )
+            checked_at = session.scalar(select(func.clock_timestamp()))
+            result = evaluate_refund_eligibility(order, checked_at)
+            session.add(
+                Execution(
+                    source_message_id=source.id,
+                    requested_order_id=order_id,
+                    outcome=result.outcome,
+                    reason_codes=list(result.reason_codes),
+                    refund_amount_minor=result.refund_amount_minor,
+                    currency=result.currency,
+                    policy_version=POLICY_VERSION,
+                    checked_at=checked_at,
+                )
+            )
+            reply = format_refund_reply(order_id, result)
         session.add(
             Message(
                 conversation_id=conversation.id,
@@ -270,8 +298,8 @@ def complete_job(claim: Claim, reply: str):
         conversation.next_message_seq += 1
         conversation.updated_at = func.clock_timestamp()
         session.flush()
-        # Recheck live time after possible lock waits; failure rolls back the entire reply.
-        # 锁等待后再次按实时时间校验；失去领取权时，整条回复及顺序号都会回滚。
+        # Recheck live time after lock waits so an expired claim rolls back all its writes.
+        # 锁等待后再次按实时时间校验，领取过期时回滚本次写入的所有记录。
         changed = session.execute(
             update(Job)
             .where(owned_job(claim))
@@ -287,8 +315,8 @@ def complete_job(claim: Claim, reply: str):
             .execution_options(synchronize_session=False)
         ).rowcount
         if changed != 1:
-            # Raising here also rolls back the reply and conversation sequence.
-            # 此处抛出异常，也会回滚回复及会话顺序号。
+            # Raising here also rolls back the check result, reply and conversation sequence.
+            # 此处抛出异常，也会回滚检查结果、回复及会话顺序号。
             raise LostLease()
 
 
@@ -325,8 +353,8 @@ def run_once(
     provider=None,
     settings=None,
 ) -> bool:
-    """Process one claim; fixed replies do not read or validate model context.
-    每次处理一个领取；固定回复不读取模型上下文，也不受模型输入限额影响。
+    """Process one claim, allowing the documented refund requests in fixed mode.
+    每次处理一项领取，并在固定回复模式下支持文档中的退款检查请求。
     """
     claim = claim_job(owner, lease_seconds, max_attempts)
     if not claim:
@@ -339,7 +367,7 @@ def run_once(
             # 固定回复无需历史，必须保留 API 原有的 20,000 字符接收能力。
             context = [] if provider.mode == "fixed" else load_context(claim, settings)
             generated = provider.generate(context)
-        complete_job(claim, generated)
+        complete_job(claim, generated, check_refund_requests=provider.mode == "fixed")
         log.info("job=%s completed mode=%s", claim.job_id, provider.mode)
     except RetryableReplyError:
         # The queue owns retries; a lost lease must not requeue somebody else's attempt.

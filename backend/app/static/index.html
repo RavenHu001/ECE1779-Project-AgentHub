@@ -8,7 +8,7 @@
   <meta name="color-scheme" content="light dark">
   <title>AgentHub</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/chat.js" defer></script>
+  <script src="/static/chat.js?v=login-explicit-close" defer></script>
 </head>
 <body>
   <!-- Reuse inline SVG symbols for controls without external icon fonts or image requests.
@@ -72,6 +72,6 @@
   </div>
   <!-- Native dialog provides modal focus handling; credentials are submitted only to the same-origin API.
        原生 dialog 提供模态焦点管理；凭据仅提交给同源 API，脚本不会将其写入本地存储。 -->
-  <dialog id="login-panel" class="login-dialog" aria-labelledby="login-title"><button id="close-login" class="icon-button dialog-close" aria-label="Close sign in"><svg><use href="#i-close"/></svg></button><svg class="login-logo"><use href="#i-logo"/></svg><h2 id="login-title">Welcome to AgentHub</h2><p class="login-description">Sign in to save your conversations<br>and pick up where you left off.</p><form id="login-form"><label for="username">Username</label><input id="username" autocomplete="username" required value="developer"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required><p id="login-error" class="notice" role="alert" hidden></p><button id="login-submit" class="primary-button" type="submit">Continue <svg><use href="#i-chevron"/></svg></button></form><p class="login-footnote">Your team account. Your own workspace.</p></dialog>
+  <dialog id="login-panel" class="login-dialog" closedby="closerequest" aria-labelledby="login-title"><button id="close-login" class="icon-button dialog-close" aria-label="Close sign in"><svg><use href="#i-close"/></svg></button><svg class="login-logo"><use href="#i-logo"/></svg><h2 id="login-title">Welcome to AgentHub</h2><p class="login-description">Sign in to save your conversations<br>and pick up where you left off.</p><form id="login-form"><label for="username">Username</label><input id="username" autocomplete="username" required value="developer"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required><p id="login-error" class="notice" role="alert" hidden></p><button id="login-submit" class="primary-button" type="submit">Continue <svg><use href="#i-chevron"/></svg></button></form><p class="login-footnote">Your team account. Your own workspace.</p></dialog>
 </body>
 </html>
