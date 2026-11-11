@@ -18,6 +18,7 @@ MAX_ORDER_ID = 2**63 - 1
 CHECK_REQUEST = re.compile(r"Can order ([0-9]{1,19}) be refunded\?|订单 ([0-9]{1,19}) 能退款吗？")
 
 REASON_TEXT = {
+    "ALREADY_REFUNDED": "A simulated refund has already been applied.",
     "NOT_PAID": "The order has not been paid.",
     "NOT_DELIVERED": "The order has not been delivered.",
     "UNSUPPORTED_CURRENCY": "The demo policy only supports CAD.",

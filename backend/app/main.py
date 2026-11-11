@@ -14,13 +14,21 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db import engine, get_session
-from app.models import Conversation, Execution, Job, Message, ResolutionProposal, User
+from app.models import Conversation, Execution, Job, Message, ProposalDecision, ResolutionProposal, User
+from app.resolution_workflow import (
+    EXPIRED_REPLY,
+    PROPOSAL_VERSION,
+    active_resolution_exists,
+    close_proposal,
+)
 from app.schemas import (
     ConversationCreate,
     ConversationOut,
     JobOut,
     MessageCreate,
     MessageOut,
+    ProposalDecisionIn,
+    ProposalDecisionOut,
     ProposalOut,
     SubmissionOut,
 )
@@ -157,8 +165,14 @@ def submit_message(
         if existing:
             if existing.content != payload.content:
                 raise HTTPException(409, "submission_key already used for different content")
-            job_id = session.scalar(select(Job.id).where(Job.source_message_id == existing.id))
+            job_id = session.scalar(
+                select(Job.id).where(Job.source_message_id == existing.id, Job.kind == "PROCESS_MESSAGE")
+            )
             return SubmissionOut(message_id=existing.id, job_id=job_id)
+        # Check for a pause after duplicate detection so earlier retries keep their original receipt.
+        # 先检查重复提交，再检查审批暂停，使旧请求重试仍能取得原始回执。
+        if active_resolution_exists(session, conversation.id):
+            raise HTTPException(409, "Resolve the active refund proposal before sending a new message.")
         # Allocate the sequence and persist the message before creating its foreign-keyed job.
         # 分配顺序号并保存消息，再创建通过外键引用它的任务；任一步失败都会整体回滚。
         message = Message(
@@ -202,26 +216,28 @@ def list_messages(
     )
     if not conversation:
         raise HTTPException(404, "Conversation not found")
-    # Read proposals with their messages in one snapshot. Both joins are one-to-one.
-    # 在同一快照中读取消息与方案，两次连接均为一对一。
+    # Read each message, proposal, decision and job in the same snapshot without multiplying rows.
+    # 在同一快照中读取消息、方案、决定与待办，保持每条消息只返回一次。
     rows = session.execute(
-        select(Message, Execution, ResolutionProposal)
+        select(Message, Execution, ResolutionProposal, ProposalDecision, Job)
         .outerjoin(Execution, Execution.source_message_id == Message.id)
         .outerjoin(ResolutionProposal, ResolutionProposal.execution_id == Execution.id)
+        .outerjoin(ProposalDecision, ProposalDecision.proposal_id == ResolutionProposal.id)
+        .outerjoin(Job, Job.id == ProposalDecision.resume_job_id)
         .where(Message.conversation_id == conversation_id, Message.seq > after_seq)
         .order_by(Message.seq)
         .limit(limit)
     )
     history = []
-    for message, execution, proposal in rows:
+    for message, execution, proposal, decision, job in rows:
         result = MessageOut.model_validate(message)
         # Keep ordinary history in its original shape and expose only public proposal fields.
         # 保留普通历史原有的结构，并只返回方案的公开字段。
         if proposal is not None:
             result.proposal = ProposalOut(
                 id=proposal.id,
-                version=1,
-                status=execution.status,
+                version=PROPOSAL_VERSION,
+                status=job.status if execution.status == "APPROVED" else execution.status,
                 ticket_id=str(proposal.ticket_id),
                 order_id=str(execution.requested_order_id),
                 refund_amount_minor=str(execution.refund_amount_minor),
@@ -232,9 +248,81 @@ def list_messages(
                 delivered_at=proposal.expected_order_facts["delivered_at"],
                 checked_at=execution.checked_at,
                 expires_at=proposal.expires_at,
+                decision=decision.decision if decision else None,
+                decided_at=decision.decided_at if decision else None,
+                resume_job_id=decision.resume_job_id if decision else None,
             )
         history.append(result)
     return history
+
+
+@app.post("/proposals/{proposal_id}/decision", response_model=ProposalDecisionOut)
+def decide_proposal(
+    proposal_id: UUID,
+    payload: ProposalDecisionIn,
+    user: User = Depends(current_user),
+    session: Session = Depends(get_session),
+):
+    """Record one human decision and enqueue an approved continuation atomically.
+    原子保存一份人工决定，并在批准时加入恢复待办。
+    """
+    with session.begin():
+        # Serialize decisions with message submissions and final replies in the same conversation.
+        # 将审批与同一会话的消息提交、最终回复串行化。
+        row = session.execute(
+            select(Conversation, ResolutionProposal)
+            .join(Message, Message.conversation_id == Conversation.id)
+            .join(Execution, Execution.source_message_id == Message.id)
+            .join(ResolutionProposal, ResolutionProposal.execution_id == Execution.id)
+            .where(ResolutionProposal.id == proposal_id, Conversation.user_id == user.id)
+            .with_for_update(of=Conversation)
+        ).one_or_none()
+        if row is None:
+            raise HTTPException(404, "Proposal not found")
+        conversation, proposal = row
+        if payload.version != PROPOSAL_VERSION:
+            raise HTTPException(409, "Proposal version has changed")
+        execution = session.get(Execution, proposal.execution_id, with_for_update=True)
+
+        # Look up the decision after locking so concurrent retries see the committed receipt.
+        # 加锁后读取决定，使并发重试能看到已提交的审批回执。
+        existing = session.get(ProposalDecision, proposal.id)
+        if existing is not None:
+            if existing.decision != payload.decision:
+                raise HTTPException(409, "A different decision has already been recorded")
+            return ProposalDecisionOut.model_validate(existing)
+        if execution.status != "WAITING_FOR_APPROVAL":
+            raise HTTPException(409, "Proposal is no longer waiting for approval")
+        now = session.scalar(select(func.clock_timestamp()))
+        if now >= proposal.expires_at:
+            close_proposal(session, conversation, execution, "INVALIDATED", EXPIRED_REPLY)
+        else:
+            # Only approval queues work. Rejection records a final reply without business writes.
+            # 只有批准才入队。拒绝仅保存最终回复，不写入业务数据。
+            job = None
+            if payload.decision == "APPROVE":
+                job = Job(source_message_id=execution.source_message_id, kind="RESUME_EXECUTION")
+                session.add(job)
+                session.flush([job])
+                execution.status = "APPROVED"
+                conversation.updated_at = now
+            else:
+                close_proposal(
+                    session, conversation, execution, "REJECTED", "The refund proposal was rejected."
+                )
+            decision = ProposalDecision(
+                proposal_id=proposal.id,
+                user_id=user.id,
+                decision=payload.decision,
+                decided_at=now,
+                resume_job_id=job.id if job else None,
+            )
+            session.add(decision)
+            return ProposalDecisionOut.model_validate(decision)
+
+    # Commit the expiration and its reply before returning the conflict to the client.
+    # 先提交失效状态及其回复，再向客户端返回冲突。
+    raise HTTPException(409, "Proposal has expired")
 
 
 # Follow the source message to enforce conversation ownership.

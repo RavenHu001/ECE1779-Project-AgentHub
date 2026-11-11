@@ -275,3 +275,54 @@ test("saved proposal restores after a new page loads the same chat", async () =>
     assert.equal(card.children[4].children.length, 0);
   }
 });
+
+for (const decision of ["APPROVE", "REJECT"]) {
+  test("proposal card submits one " + decision + " and displays the durable result", async () => {
+    const proposal = {
+      id: "proposal", version: 1, status: "WAITING_FOR_APPROVAL", ticket_id: "391", order_id: "1001",
+      refund_amount_minor: "12999", currency: "CAD", proposed_ticket_status: "RESOLVED",
+      delivered_at: "2026-11-06T12:00:00Z", expires_at: "2026-11-12T12:00:00Z", policy_version: "DEMO-CAD-30D/v1",
+      customer_reply: "The refund is eligible.",
+    };
+    let calls = 0;
+    let releaseDecision;
+    const decisionResponse = new Promise(resolve => { releaseDecision = resolve; });
+    const client = createClient(async (url, options) => {
+      if (url === "/proposals/proposal/decision") {
+        calls++;
+        assert.deepEqual(JSON.parse(options.body), { decision, version: 1 });
+        await decisionResponse;
+        proposal.status = decision === "APPROVE" ? "QUEUED" : "REJECTED";
+        if (decision === "APPROVE") proposal.resume_job_id = "resume-job";
+        return response({});
+      }
+      if (url === "/jobs/resume-job") {
+        proposal.status = "COMPLETED";
+        return response({ status: "SUCCEEDED" });
+      }
+      assert.match(url, /^\/conversations\/refund-chat\/messages\?/);
+      return response([{ seq: 1, role: "user", content: "Prepare a refund for ticket 391", proposal: { ...proposal } }]);
+    });
+    await client.run("authorization = 'Basic demo'; openConversation({id:'refund-chat', title:'Refund'})");
+    const initialCard = client.element("messages").children[1];
+    const buttons = initialCard.children[6].children;
+    const button = buttons[decision === "APPROVE" ? 0 : 1];
+
+    // Fire twice while the first request is in flight to exercise the client-side guard.
+    // 首个请求尚未返回时再次点击，验证客户端的重复提交保护。
+    const first = button.listeners.get("click")();
+    await button.listeners.get("click")();
+    assert.equal(calls, 1);
+    assert.ok(buttons.every(button => button.disabled));
+    releaseDecision();
+    await first;
+
+    const expected = decision === "APPROVE" ? "Completed" : "Rejected";
+    for (let i = 0; i < 25 && client.element("messages").children[1].children[1].textContent !== expected; i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const card = client.element("messages").children[1];
+    assert.equal(card.children[1].textContent, expected);
+    assert.ok(!card.children.some(child => child.className === "proposal-actions"));
+  });
+}

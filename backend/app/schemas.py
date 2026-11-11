@@ -56,7 +56,9 @@ class MessageCreate(BaseModel):
 class ProposalOut(BaseModel):
     id: UUID
     version: Literal[1]
-    status: Literal["WAITING_FOR_APPROVAL"]
+    status: Literal[
+        "WAITING_FOR_APPROVAL", "QUEUED", "RUNNING", "COMPLETED", "REJECTED", "INVALIDATED", "FAILED"
+    ]
     # Serialize BIGINT identifiers and amounts as strings so browsers preserve every digit.
     # 将 BIGINT 编号和金额序列化为字符串，避免浏览器丢失精度。
     ticket_id: str
@@ -69,6 +71,27 @@ class ProposalOut(BaseModel):
     delivered_at: datetime
     checked_at: datetime
     expires_at: datetime
+    decision: Literal["APPROVE", "REJECT"] | None = None
+    decided_at: datetime | None = None
+    resume_job_id: UUID | None = None
+
+
+# Only the authenticated employee can supply a decision on the identified version.
+# 仅经过身份验证的员工可对指定版本作出决定。
+class ProposalDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["APPROVE", "REJECT"]
+    version: int = Field(strict=True, gt=0)
+
+
+# Return the original decision receipt on every identical retry.
+# 每次重试相同决定时返回原始审批回执。
+class ProposalDecisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    proposal_id: UUID
+    decision: Literal["APPROVE", "REJECT"]
+    decided_at: datetime
+    resume_job_id: UUID | None
 
 
 # Return saved chat text and its relationship to the originating request.

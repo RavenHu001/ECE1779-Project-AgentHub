@@ -105,4 +105,12 @@ The seed command can be repeated. It preserves existing order facts and ticket s
 
 With the same fixed-mode demo data, send `Prepare a refund for ticket 391` or `处理工单 391`. The worker checks the ticket, linked order, and refund policy, then saves a **Waiting for approval** card with the amount, proposed customer reply, and proposed ticket status. Refresh the page, sign in again, and open the saved conversation to see the same proposal. Ticket `392` returns the expired-window explanation and ticket `393` reports the missing delivery date.
 
-The conversation history API returns the proposal on its originating message. The planning job finishes when it saves the proposal, and the execution remains waiting for approval. Approval decisions and simulated business writes follow this milestone. See the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md).
+The conversation history API returns the proposal on its originating message. The planning job finishes when it saves the proposal, and the execution remains waiting for approval.
+
+## Approve or reject a refund proposal
+
+Open the pending card and click **Reject** to test the rejection path. The card displays **Rejected**, and ticket `391` stays open. Prepare another proposal and click **Approve**. The card progresses to **Completed**, and the conversation receives a final reply confirming the simulated refund and ticket resolution. Refresh, sign in again, and open the conversation to verify the same decision and result.
+
+The decision endpoint is `POST /proposals/{proposal_id}/decision`. Send `{"version":1,"decision":"APPROVE"}` or `{"version":1,"decision":"REJECT"}`. Repeating the same decision returns the original receipt. A conflicting decision or stale proposal returns HTTP `409`. A proposal for an order whose facts changed becomes invalid. The refund, simulated customer reply, ticket update, and worker result commit in one PostgreSQL transaction. A second proposal for the same order cannot refund it again.
+
+The conversation pauses while its proposal is pending or its approved continuation is running. Other conversations can continue. Expired pending proposals are closed by the worker. When rolling out migration `0006`, replace planning-only workers before enabling approval requests so those workers cannot claim continuation jobs.

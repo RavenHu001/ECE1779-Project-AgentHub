@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Execution, Order, ResolutionProposal
+from app.models import AppliedResolution, Execution, Order, ResolutionProposal
 from app.refund_eligibility import (
     POLICY_VERSION,
     REFUND_WINDOW,
@@ -71,6 +71,14 @@ def _record_order_check(
     # 资格判断和持久化依据使用同一个数据库时刻。
     checked_at = session.scalar(select(func.clock_timestamp()))
     result = evaluate_refund_eligibility(order, checked_at)
+    if (
+        order is not None
+        and session.scalar(
+            select(AppliedResolution.proposal_id).where(AppliedResolution.order_id == order.id)
+        )
+        is not None
+    ):
+        result = RefundEligibility("INELIGIBLE", ("ALREADY_REFUNDED",), currency=result.currency)
     execution = Execution(
         source_message_id=source_id,
         requested_order_id=order_id,
@@ -83,6 +91,19 @@ def _record_order_check(
     )
     session.add(execution)
     return execution, result
+
+
+def order_facts(order: Order) -> dict:
+    """Capture the policy inputs in the same format for planning and application.
+    在准备与执行阶段以同一格式提取退款规则使用的订单资料。
+    """
+    return {
+        "payment_status": order.payment_status,
+        "fulfillment_status": order.fulfillment_status,
+        "paid_total_minor": order.paid_total_minor,
+        "currency": order.currency,
+        "delivered_at": order.delivered_at.astimezone(UTC).isoformat() if order.delivered_at else None,
+    }
 
 
 def check_demo_refund_request(session: Session, source_id: UUID, content: str, user_id: UUID) -> str | None:
@@ -154,13 +175,7 @@ def prepare_refund(session: Session, source_id: UUID, user_id: UUID, action: Pre
             ticket_id=action.ticket_id,
             customer_reply=customer_reply,
             proposed_ticket_status="RESOLVED",
-            expected_order_facts={
-                "payment_status": order.payment_status,
-                "fulfillment_status": order.fulfillment_status,
-                "paid_total_minor": order.paid_total_minor,
-                "currency": order.currency,
-                "delivered_at": delivered_at.isoformat(),
-            },
+            expected_order_facts=order_facts(order),
             expires_at=expires_at,
         )
     )

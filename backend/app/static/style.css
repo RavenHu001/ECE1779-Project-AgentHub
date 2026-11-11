@@ -147,6 +147,13 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .proposal-card h4 { margin: 0 0 4px; font-size: 13px; }
 .proposal-card blockquote { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bubble); font-size: 13px; white-space: pre-wrap; }
 .proposal-expiry { margin: 10px 0 0; font-size: 12px; }
+/* Keep decisions beside the proposal they affect and preserve the focus indicator.
+   将审批操作放在对应方案旁，并保留键盘焦点提示。 */
+.proposal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.proposal-actions button { border: 1px solid var(--border); border-radius: 8px; padding: 6px 13px; font-size: 13px; }
+.proposal-approve { background: var(--button); color: var(--button-text); }
+.proposal-reject { background: var(--input); color: var(--text); }
+.proposal-actions button:disabled { opacity: .6; cursor: default; }
 .pending-message { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--muted); padding: 4px 0 24px; }
 .notice { font-size: 12px; color: var(--error); line-height: 1.6; margin: 12px 2px; white-space: pre-wrap; }
 /* Footer and collapsed navigation keep their controls reachable when the sidebar is hidden.
