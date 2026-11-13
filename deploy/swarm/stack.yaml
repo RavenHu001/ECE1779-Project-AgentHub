@@ -1,0 +1,183 @@
+
+version: "3.8"
+
+# Swarm uses registry images, not local Compose builds.
+x-app: &app
+  image: ${AGENTHUB_IMAGE:?Set AGENTHUB_IMAGE to a registry image tag or digest}
+  networks: [backend]
+  environment: &app-env
+    PGHOST: db
+    PGPORT: "5432"
+    PGDATABASE: ${POSTGRES_DB:-agenthub}
+    PGUSER: ${POSTGRES_USER:-agenthub}
+    PGCONNECT_TIMEOUT: "5"
+    REPLY_MODE: fixed
+  secrets:
+    - source: db_password
+      target: db_password
+  # Adapt secret files to the existing image without changing application code.
+  entrypoint:
+    - /bin/sh
+    - -ec
+    - 'export PGPASSWORD="$$(cat /run/secrets/db_password)"; test -n "$$PGPASSWORD"; exec "$$@"'
+    - --
+
+x-app-deploy: &app-deploy
+  mode: replicated
+  endpoint_mode: vip
+  placement:
+    constraints: [node.platform.os == linux]
+    preferences:
+      - spread: node.labels.agenthub.node
+  restart_policy:
+    condition: any
+    delay: 5s
+  update_config:
+    parallelism: 1
+    delay: 10s
+    order: start-first
+    failure_action: pause
+    monitor: 150s
+    max_failure_ratio: 0
+  resources:
+    reservations:
+      cpus: "0.10"
+      memory: 128M
+    limits:
+      cpus: "1.0"
+      memory: 512M
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE to a PostgreSQL 17 tag or digest}
+    networks: [backend]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agenthub}
+      POSTGRES_USER: ${POSTGRES_USER:-agenthub}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      TZ: UTC
+    secrets:
+      - source: db_password
+        target: db_password
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_PATH:?Set POSTGRES_DATA_PATH to the mounted Volume data directory}
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 60s
+    deploy:
+      mode: replicated
+      replicas: 1
+      endpoint_mode: vip
+      placement:
+        constraints:
+          - node.platform.os == linux
+          - node.labels.agenthub.db == true
+      restart_policy:
+        condition: any
+        delay: 5s
+      # Never run two PostgreSQL tasks against the same data directory.
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: pause
+        monitor: 120s
+      resources:
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # Scale this service to one only after database readiness, then verify exit 0.
+  setup:
+    <<: *app
+    environment:
+      <<: *app-env
+      BOOTSTRAP_USERNAME: ${BOOTSTRAP_USERNAME:-developer}
+    secrets:
+      - source: db_password
+        target: db_password
+      - source: bootstrap_password
+        target: bootstrap_password
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        export BOOTSTRAP_PASSWORD="$$(cat /run/secrets/bootstrap_password)"
+        test -n "$$BOOTSTRAP_PASSWORD"
+        alembic upgrade head
+        exec python -m app.manage bootstrap
+    healthcheck:
+      disable: true
+    deploy:
+      <<: *app-deploy
+      replicas: 0
+      restart_policy:
+        condition: none
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: pause
+
+  api:
+    <<: *app
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000"]
+    ports:
+      - target: 8000
+        published: ${API_PUBLISHED_PORT:-18000}
+        protocol: tcp
+        mode: ingress
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 45s
+    deploy:
+      <<: *app-deploy
+      replicas: ${API_REPLICAS:-2}
+
+  worker:
+    <<: *app
+    environment:
+      <<: *app-env
+      WORKER_POLL_SECONDS: "1"
+      WORKER_LEASE_SECONDS: "60"
+      WORKER_MAX_ATTEMPTS: "3"
+    command: [python, -m, app.worker]
+    # This checks database access, not worker progress; use the smoke job for that.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          export PGPASSWORD="$$(cat /run/secrets/db_password)";
+          exec python -c "from app.db import engine; from sqlalchemy import text;
+          connection = engine.connect(); connection.execute(text('SELECT 1')); connection.close()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 45s
+    deploy:
+      <<: *app-deploy
+      replicas: ${WORKER_REPLICAS:-2}
+
+networks:
+  backend:
+    driver: overlay
+
+secrets:
+  db_password:
+    external: true
+    name: ${DB_PASSWORD_SECRET:?Set DB_PASSWORD_SECRET to an existing Swarm secret name}
+  bootstrap_password:
+    external: true
+    name: ${BOOTSTRAP_PASSWORD_SECRET:?Set BOOTSTRAP_PASSWORD_SECRET to an existing Swarm secret name}
