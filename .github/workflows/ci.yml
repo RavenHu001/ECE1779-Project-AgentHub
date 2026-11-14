@@ -5,14 +5,19 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      export_runtime_image:
+        description: Export the tested runtime image for the release workflow
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   # A newer change replaces only the older CI run for the same Git reference.
-  # 新提交只替代同一 Git 引用的旧 CI 检查。
-  group: backend-ci-${{ github.ref }}
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,13 +30,17 @@ jobs:
         with:
           python-version: '3.13'
       # Node is a test-only dependency; the runtime image continues to serve static assets directly.
-      # Node 只用于测试；运行镜像仍由 API 直接提供静态资源。
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Offline deployment checks
+        run: |
+          for script in deploy/scripts/*.sh; do bash -n "$script"; done
+          python -m unittest discover -s deploy/tests -v
+          python deploy/scripts/smoke.py --plan
+          python deploy/scripts/monitor.py --plan
       - name: Browser client state regressions
         # Exercise Unicode titles, uncertain retries, account cleanup, and stale history responses.
-        # 验证 Unicode 标题、待确认重试、账号退出清理以及过期历史响应。
         run: node --test backend/tests/test_chat_client.cjs
       - name: Generate isolated configuration
         run: python scripts/init_env.py --project-name agenthub-ci
@@ -43,17 +52,28 @@ jobs:
         run: docker compose run --rm --no-deps test sh -c 'ruff check . && ruff format --check .'
       - name: Test with isolated PostgreSQL
         # The test profile never connects fixtures to the development database.
-        # 测试配置不会将夹具连接到开发数据库。
         run: docker compose run --rm test
       - name: Start the application
         run: docker compose up -d --wait
       - name: Exercise live API and worker
         run: docker compose exec -T api python -m app.smoke
+      - name: Export the tested runtime image
+        if: inputs.export_runtime_image == true
+        run: docker image save agenthub-ci-backend:dev --output "${{ runner.temp }}/agenthub-runtime.tar"
+      - name: Retain the tested image for publication
+        if: inputs.export_runtime_image == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-image-${{ github.run_id }}
+          path: ${{ runner.temp }}/agenthub-runtime.tar
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+          if-no-files-found: error
       - name: Service status on failure
         if: failure()
         run: docker compose ps -a
       - name: Remove CI containers and disposable CI volumes
         # Volume deletion is limited to this disposable CI project.
-        # 删除数据卷仅限此临时 CI 项目。
         if: always()
         run: docker compose --profile test down --volumes --remove-orphans
