@@ -1,15 +1,23 @@
 # AgentHub Swarm deployment — Milestone 1
 
+For the Milestone 2 automation, image release workflow and proposed two-node
+procedure, see [CLOUD_DEPLOYMENT.md](../../docs/CLOUD_DEPLOYMENT.md) and
+[config.example.env](config.example.env). The manual commands below remain the
+Docker Desktop rehearsal procedure; the new online automation requires a native
+Linux manager. Existing test evidence remains in [LOCAL_VALIDATION.md](LOCAL_VALIDATION.md).
+
 This stack reuses the existing backend runtime image for FastAPI, workers, and
 database setup. It runs two API replicas, two worker replicas, and one PostgreSQL
 17 replica. A fourth service, `setup`, normally has zero replicas and is started
 manually to run migrations and bootstrap. All services use an overlay network;
 `db` and `api` resolve through Swarm service discovery. API ingress uses Swarm's
-routing mesh. The local `compose.yaml` and CI workflow are unchanged.
+routing mesh. The local `compose.yaml` remains the development setup; the steps
+below describe the manual Milestone 1 procedure.
 
 This milestone uses `REPLY_MODE=fixed` only. No model key is required or mounted.
-HTTPS, automated delivery, monitoring, backups, and database failover are outside
-this milestone. Commands below are Bash commands, run from the repository root
+HTTPS, automated delivery, DigitalOcean alerts, backups, and database failover are outside
+this milestone. A read-only point-in-time monitor is documented in
+[CLOUD_DEPLOYMENT.md](../../docs/CLOUD_DEPLOYMENT.md#read-only-monitoring). Commands below are Bash commands, run from the repository root
 on a Linux Swarm manager unless another host is specified. Use a dedicated test
 Swarm, not a shared development database, for the first rehearsal.
 
@@ -463,10 +471,12 @@ Before calling the DigitalOcean deployment verified, record:
 - Resource usage sufficient for the baseline and temporary update tasks; adjust
   the initial reservations/limits based on measured results.
 
-No cloud resources are created by this repository change. HTTPS, CI/CD,
-monitoring, backups, automated rollback, and live model validation are later
-milestones. Local Compose tests remain the backend regression workflow; this
-Swarm rehearsal is a separate deployment smoke check, not a live provider test.
+No cloud resources are created by this repository change. HTTPS, automatic
+deployment, DigitalOcean Metrics/Alerts, backups, automated rollback, and live
+model validation are later milestones. A read-only monitoring snapshot is
+documented in [CLOUD_DEPLOYMENT.md](../../docs/CLOUD_DEPLOYMENT.md#read-only-monitoring).
+Local Compose tests remain the backend regression workflow; this Swarm rehearsal
+is a separate deployment smoke check, not a live provider test.
 
 References: [Docker stack deployment](https://docs.docker.com/engine/swarm/stack-deploy/),
 [Swarm secrets](https://docs.docker.com/engine/swarm/secrets/),

@@ -10,7 +10,7 @@ The user explicitly approved the PostgreSQL replacement and one-worker interrupt
 - Target stack: `agenthub-m1-local-validation`; reply mode: `fixed`.
 - Application image: `agenthub-swarm-local:7008d9f-validation`.
 
-## Authenticated baseline ? passed
+## Authenticated baseline — passed
 
 Credentials were read privately from the ignored `.env.swarm-validation` file,
 used in an in-memory HTTP Authorization header, and never printed, passed in
@@ -36,7 +36,7 @@ the earlier read-only SQL baseline. No replacement conversation or test job was 
 - Complete history was compared, not only the count or hash. Message contents are
   retained only in the private local temporary baseline, not in this report.
 
-## PostgreSQL persistence ? passed
+## PostgreSQL persistence — passed
 
 All services were healthy and no jobs were queued or running immediately before
 replacement. The actual command was issued exactly once:
@@ -87,7 +87,7 @@ No directory, volume, secret, schema, or image was replaced by the test commands
 Recovery timing measures when polling observed healthy services, not exact
 HTTP downtime. Transient unavailability between observations was not measured.
 
-## One worker replica failure and recovery ? passed
+## One worker replica failure and recovery — passed
 
 This test ran only after the persistence test passed. Both workers were healthy
 and the read-only job count was zero immediately before interruption. One current
@@ -130,7 +130,7 @@ worker service specification did not change, and authenticated history remained
 identical. **This verifies replica recovery only. No interrupted-job recovery,
 lease reclamation, or exactly-once processing claim follows from this idle test.**
 
-## API distribution ? passed without interruption
+## API distribution — passed without interruption
 
 During the earlier read-only preflight, 20 sequential `/health` requests used
 separate HTTP connections and `Connection: close`. The correlation marker was
@@ -183,6 +183,50 @@ or written by the validation commands. Existing user-created files were preserve
 Only this report was updated in the repository. No application/frontend code,
 credentials, Docker volumes or secrets were changed. No cleanup/prune operation,
 DigitalOcean action, commit, or push was performed. No rollback was needed.
+
+## Docker Desktop Restart and Persistence Validation
+
+After restarting the Windows computer, Docker Desktop and the local single-node
+Swarm recovered. The initial service status temporarily showed zero replicas;
+services subsequently recovered automatically. Historical Swarm task records
+showed temporary startup failures during recovery, followed by successful
+running tasks.
+
+### Automated checks
+
+The read-only monitor was run with:
+
+```powershell
+python deploy/scripts/monitor.py --stack agenthub-m1-local-validation --expected-nodes 1 --url http://127.0.0.1:18000
+```
+
+Observed output:
+
+```text
+PASS: API and PostgreSQL connectivity; reply_mode=fixed
+PASS: api=2/2, db=1/1, setup=0/0, worker=2/2
+PASS: every running API, worker, and PostgreSQL task/container is healthy
+PASS: 1 Swarm node(s) Ready and Active
+```
+
+The API health endpoint returned:
+
+```json
+{"status":"ok","database":"ok","reply_mode":"fixed"}
+```
+
+The final observed service state was PostgreSQL 1/1, API 2/2, Worker 2/2,
+and Setup 0/0. The Swarm node was Ready, Active, and Leader.
+
+### Manual web-interface checks
+
+The existing developer account and password still worked in the AgentHub web
+interface. Previous conversation history remained accessible, and no database
+reinitialization was needed.
+
+These results cover restart recovery and account/history availability on the
+local single-node Docker Desktop Swarm only. They do not establish DigitalOcean
+Volume persistence, multi-node recovery, or database high availability.
 
 ## Limits
 

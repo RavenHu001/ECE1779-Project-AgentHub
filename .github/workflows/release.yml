@@ -1,0 +1,81 @@
+name: Release runtime image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  required-checks:
+    uses: ./.github/workflows/ci.yml
+    with:
+      export_runtime_image: true
+
+  delivery-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check deployment scripts without a deployment
+        run: |
+          for script in deploy/scripts/*.sh; do bash -n "$script"; done
+          python -m unittest discover -s deploy/tests -v
+          python deploy/scripts/monitor.py --plan
+      - name: Parse the Swarm stack using non-secret placeholders
+        env:
+          AGENTHUB_IMAGE: ghcr.io/example/agenthub/backend:validation
+          POSTGRES_IMAGE: postgres:17-bookworm
+          POSTGRES_DATA_PATH: /mnt/validation/postgres
+          DB_PASSWORD_SECRET: validation-db
+          BOOTSTRAP_PASSWORD_SECRET: validation-bootstrap
+        run: docker stack config -c deploy/swarm/stack.yaml > /dev/null
+
+  publish:
+    needs: [required-checks, delivery-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-image-${{ github.run_id }}
+          path: ${{ runner.temp }}/runtime
+      - name: Publish the exact runtime image that passed CI
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/backend"
+          tag="sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker load --input "$RUNNER_TEMP/runtime/agenthub-runtime.tar"
+          docker tag agenthub-ci-backend:dev "$image:$tag"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          push_log="$RUNNER_TEMP/docker-push.log"
+          docker push "$image:$tag" 2>&1 | tee "$push_log"
+          digest=$(sed -nE 's/.*digest: (sha256:[a-f0-9]{64})([[:space:]].*)?$/\1/p' "$push_log" | tail -n 1)
+          if [[ ! $digest =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo '::error::Docker push did not return a valid image digest'
+            exit 1
+          fi
+          docker pull "$image@$digest" >/dev/null
+          tested_id=$(docker image inspect agenthub-ci-backend:dev --format '{{.Id}}')
+          published_id=$(docker image inspect "$image@$digest" --format '{{.Id}}')
+          if [[ $tested_id != "$published_id" ]]; then
+            echo '::error::Published digest does not match the runtime image tested by CI'
+            exit 1
+          fi
+          printf 'Tested revision: `%s`\n\nVersioned image: `%s:%s`\n\nDeploy by digest: `%s`\n' "$GITHUB_SHA" "$image" "$tag" "$digest" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove runner registry credentials
+        if: always()
+        run: docker logout ghcr.io
