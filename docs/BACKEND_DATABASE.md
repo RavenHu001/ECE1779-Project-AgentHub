@@ -1,6 +1,6 @@
 # Backend Database
 
-The API and worker share one PostgreSQL database and coordinate through durable jobs. The four chat tables below are joined by `orders` and `executions` for the read-only refund check. Alembic tracks applied revisions in `alembic_version`.
+The API and worker share one PostgreSQL database and coordinate through durable jobs. The chat tables support the simulated refund workflow described below. Alembic tracks applied revisions in `alembic_version`.
 
 ```mermaid
 erDiagram
@@ -10,7 +10,7 @@ erDiagram
     messages o|--o| messages : replies_to
 ```
 
-Every conversation has one account owner. User messages create processing jobs; assistant replies do not. Each user message can have at most one final reply in this initial milestone.
+Every conversation has one account owner. User messages create processing jobs. A human approval can enqueue one continuation for the same user message. Each user message can have at most one final reply.
 
 ## Shared conventions
 
@@ -74,8 +74,8 @@ Sequence order reflects insertion order, not guaranteed completion order for con
 | Field | PostgreSQL type | Nullability and default | Meaning |
 | --- | --- | --- | --- |
 | `id` | `UUID` | Required; application-generated | Primary key |
-| `source_message_id` | `UUID` | Required; unique | Foreign key to the source `messages.id` |
-| `kind` | `TEXT` | Required; `PROCESS_MESSAGE` | Only implemented job type |
+| `source_message_id` | `UUID` | Required; unique with `kind` | Foreign key to the source `messages.id` |
+| `kind` | `TEXT` | Required; defaults to `PROCESS_MESSAGE` | Initial message processing or `RESUME_EXECUTION` |
 | `status` | `TEXT` | Required; `QUEUED` | `QUEUED`, `RUNNING`, `SUCCEEDED` or `FAILED` |
 | `attempts` | `INTEGER` | Required; `0` | Nonnegative number of claims, including recovery attempts |
 | `available_at` | `TIMESTAMPTZ` | Required; `now()` | Earliest claim time for queued work |
@@ -94,16 +94,20 @@ An index on `(status, available_at, created_at)` supports ready-work selection. 
 
 ## Transaction and recovery behavior
 
-1. The API checks ownership and locks the conversation. It atomically allocates a sequence number, inserts the user message and inserts its job. Unique constraints alone guarantee at most one job; the transaction ensures that each accepted user message actually has one.
+1. The API checks ownership and locks the conversation. It atomically allocates a sequence number, inserts the user message and inserts its initial job. The source-message and kind constraint permits one job of each kind.
 2. A worker locks a claimable row using `FOR UPDATE SKIP LOCKED`, increments attempts and assigns a new lease token. Expired running work can be reclaimed, subject to the configured attempt limit.
 3. The worker saves the final reply, advances the conversation counter and marks the job successful in one transaction. A live-time ownership check is repeated before completion; failure rolls back the reply and sequence change as well.
 
 The normal path is `QUEUED → RUNNING → SUCCEEDED`. Non-retryable processing exceptions become `FAILED`. Transient model failures requeue with a bounded delay. Interrupted work can be reclaimed after lease expiry; the defaults are a renewable 60-second lease and at most three claims. The worker serializes pending jobs within each conversation. These worker-baseline changes reuse the same four tables and constraints; see [Worker baseline](WORKER_BASELINE.md).
 
-## Read-only refund data
+## Simulated refund data
 
 - `orders` holds simulated orders assigned to individual users. The worker looks up an order by its number and the source conversation owner's ID.
-- `executions` holds one structured eligibility result per source message, including the requested order number, outcome, reasons, policy version and check time. The worker commits the result with the reply and job success.
+- `tickets` holds account-scoped tickets and their optional links to orders.
+- `executions` holds one eligibility result per source message, including the policy version and check time. Proposed actions carry an execution state.
+- `resolution_proposals` holds the fixed proposal and the order facts used to prepare it. The planning job completes in the same transaction as proposal creation.
+- `proposal_decisions` holds the deciding account, decision time, and original continuation receipt. Each proposal has at most one decision.
+- `applied_resolutions` holds the simulated refund and customer reply. Unique order and ticket keys prevent duplicate application. The worker commits the result, ticket status, final chat reply, and continuation success together.
 
 See [the demo setup](WORKER_BASELINE.md#read-only-refund-check) for sample data and how to run the check.
 
@@ -111,4 +115,4 @@ See [the demo setup](WORKER_BASELINE.md#read-only-refund-check) for sample data 
 
 `0001_initial` contains the historical initial DDL. `0002_english_defaults` changes only the default for future title inserts; existing titles and messages remain unchanged. The English default is also defined in the request schema and ORM model.
 
-`0003_read_only_refund_check` creates `orders` and `executions`. The demo seed command runs after accounts exist. New job types for approval and resume work will require migration of the current job-kind and source-message uniqueness rules. See the [team guide](../README.md) for migration commands and test isolation.
+`0003_read_only_refund_check` creates orders and executions. `0004_read_only_ticket_lookup` adds tickets, and `0005_resolution_proposals` adds proposals. `0006_approved_resolutions` adds decisions and applied results, and changes job uniqueness to `(source_message_id, kind)`. Downgrading from `0006` requires a database without saved decisions or invalidations. See the [team guide](../README.md) for migration commands and test isolation.

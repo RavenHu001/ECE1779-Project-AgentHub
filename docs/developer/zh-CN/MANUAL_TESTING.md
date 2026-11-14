@@ -1,6 +1,6 @@
 # 后端手动测试指南
 
-使用 Swagger 接口页面或 Postman，手动检查当前 Docker 后端的账号验证、聊天、持久待办和固定英文回复。模型调用、审批、SSE 和退款尚不属于这套测试。
+使用 Swagger 或 Postman 检查账号验证、聊天和持久待办（MT01–MT15）。使用浏览器聊天页检查固定模式下的退款流程（MT16–MT19）。
 
 启动细节见 [中文使用说明](README.md)。[英文版](../../MANUAL_TESTING.md) 使用相同的测试编号和结果字段，方便队员与评审人对照。
 
@@ -186,6 +186,19 @@ docker compose up -d --wait
 
 **不要添加 `-v` 或 `--volumes`，它们会删除数据库数据卷。** 本项也不等于备份恢复测试。
 
+## 在浏览器中测试退款流程
+
+使用全新的本地演示数据库，设置 `REPLY_MODE=fixed`。启动 Compose 后，按[账号管理说明](../../../README.md#individual-accounts)创建有效的 `alice` 和 `bob`，再运行 `docker compose run --rm admin seed-demo-tickets alice bob`。重复运行初始化命令会保留已关闭的工单和已有退款。打开 <http://127.0.0.1:8000/>，以 Alice 登录。
+
+| 编号 | 操作 | 预期结果 |
+| --- | --- | --- |
+| MT16 | 依次发送 `查询工单 391` 和 `查询工单 395`。 | 工单 `391` 为打开状态，关联订单 `1001`，可模拟退款 CAD 129.99。查询 Bob 的工单 `395` 返回 `Ticket not found.`。 |
+| MT17 | 发送 `处理工单 391`。刷新页面，重新登录并打开原会话。 | 历史中仍只有同一张 **Waiting for approval** 卡片，金额和客户回复草稿一致。 |
+| MT18 | 点击 **Reject**，再发送 `查询工单 391`。 | 卡片显示 **Rejected**，工单仍打开，订单仍符合退款资格。 |
+| MT19 | 再为 `391` 生成一份方案并点击 **Approve**。等待 **Completed**，刷新并打开原会话，再次查询 `391`。 | 历史显示一张已拒绝卡片、一张已完成卡片和一条确认模拟退款 CAD 129.99 的最终回复。工单已关闭，订单已退款。 |
+
+如需在 Swagger 检查审批重试，从会话历史响应取得已完成卡片的 `proposal.id`。对 `/proposals/{proposal_id}/decision` 两次提交 `{"version":1,"decision":"APPROVE"}`，预期返回相同回执。再对同一方案提交 `REJECT`，预期返回 HTTP `409`。
+
 ## 失败时怎样排查
 
 记录测试编号、HTTP 状态、去除敏感信息的响应、相关资源编号和发生时间。查看失败 job 的 `last_error`，并检查日志：
@@ -229,10 +242,14 @@ docker compose logs --tail 100 migrate bootstrap db
 | MT13 | 其他账号的资源 | HTTP 404；B 列表不含 C1 | 待填写 | NOT_RUN |
 | MT14 | 停止 worker | 先 QUEUED，再一条回复及 SUCCEEDED | 待填写 | NOT_RUN |
 | MT15 | 重建容器 | 已存记录和账号访问均保留 | 待填写 | NOT_RUN |
+| MT16 | 查询工单和归属 | 工单 391 可退款，Alice 看不到工单 395 | 待填写 | NOT_RUN |
+| MT17 | 刷新后恢复待审批方案 | 一张卡片，金额和草稿一致 | 待填写 | NOT_RUN |
+| MT18 | 拒绝方案 | 已拒绝，工单仍打开 | 待填写 | NOT_RUN |
+| MT19 | 批准并重开历史 | 已完成，一笔模拟退款且工单已关闭 | 待填写 | NOT_RUN |
 
 | 后续信息 | 填写内容 |
 | --- | --- |
-| 汇总 | PASS：__ / FAIL：__ / BLOCKED：__ / NOT_RUN：__；合计 15 项 |
+| 汇总 | PASS：__ / FAIL：__ / BLOCKED：__ / NOT_RUN：__；合计 19 项 |
 | 问题链接与复现步骤 | 待填写 |
 | 复测日期与结果 | 待填写 |
 | 环境恢复确认 | 待填写：确认 worker 运行，检查待办及服务健康状态 |

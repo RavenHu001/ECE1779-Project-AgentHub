@@ -248,3 +248,119 @@ async function delayedHistory({ reject = false, fullPage = false } = {}) {
 test("old history cannot overwrite a newly saved reply", () => delayedHistory());
 test("old history failures do not replace a newer successful state", () => delayedHistory({ reject: true }));
 test("superseded history does not fetch additional stale pages", () => delayedHistory({ fullPage: true }));
+
+test("saved proposal restores after a new page loads the same chat", async () => {
+  const conversation = { id: "proposal-chat", title: "Ticket 391" };
+  const proposal = {
+    id: "saved-proposal", status: "WAITING_FOR_APPROVAL", ticket_id: "391", order_id: "1001",
+    refund_amount_minor: "9223372036854775807", currency: "CAD", proposed_ticket_status: "RESOLVED",
+    delivered_at: "2026-11-06T12:00:00Z", expires_at: "2026-11-12T12:00:00Z", policy_version: "DEMO-CAD-30D/v1",
+    customer_reply: "<img src=x> 感谢您的耐心。",
+  };
+  // Both pages load the same saved response from the server.
+  // 两个页面均从服务端读取相同的已保存历史。
+  const rows = [{ seq: 1, role: "user", content: "Prepare a refund for ticket 391", proposal }];
+  for (let page = 0; page < 2; page++) {
+    const client = createClient(url => {
+      assert.match(url, /^\/conversations\/proposal-chat\/messages\?/);
+      return response(rows);
+    });
+    await client.run("authorization = 'Basic demo'; openConversation(" + JSON.stringify(conversation) + ")");
+    const [, card] = client.element("messages").children;
+    assert.equal(client.element("messages").children.length, 2);
+    assert.equal(card.attributes.get("data-proposal-id"), proposal.id);
+    assert.equal(card.children[1].textContent, "Waiting for approval");
+    assert.equal(card.children[2].children[5].textContent, "CAD 92233720368547758.07");
+    assert.equal(card.children[4].textContent, proposal.customer_reply);
+    assert.equal(card.children[4].children.length, 0);
+  }
+});
+
+for (const decision of ["APPROVE", "REJECT"]) {
+  test("proposal card submits one " + decision + " and displays the durable result", async () => {
+    const proposal = {
+      id: "proposal", version: 1, status: "WAITING_FOR_APPROVAL", ticket_id: "391", order_id: "1001",
+      refund_amount_minor: "12999", currency: "CAD", proposed_ticket_status: "RESOLVED",
+      delivered_at: "2026-11-06T12:00:00Z", expires_at: "2026-11-12T12:00:00Z", policy_version: "DEMO-CAD-30D/v1",
+      customer_reply: "The refund is eligible.",
+    };
+    let calls = 0;
+    let jobReads = 0;
+    let releaseDecision;
+    const decisionResponse = new Promise(resolve => { releaseDecision = resolve; });
+    const client = createClient(async (url, options) => {
+      if (url === "/proposals/proposal/decision") {
+        calls++;
+        assert.deepEqual(JSON.parse(options.body), { decision, version: 1 });
+        await decisionResponse;
+        proposal.status = decision === "APPROVE" ? "QUEUED" : "REJECTED";
+        if (decision === "APPROVE") proposal.resume_job_id = "resume-job";
+        return response({});
+      }
+      if (url === "/jobs/resume-job") {
+        // A brief outage must not strand the card before a later successful read.
+        // 短暂故障后，后续成功读取仍应刷新方案卡片。
+        if (++jobReads === 1) return { ok: false, status: 503 };
+        proposal.status = "COMPLETED";
+        return response({ status: "SUCCEEDED" });
+      }
+      assert.match(url, /^\/conversations\/refund-chat\/messages\?/);
+      return response([{ seq: 1, role: "user", content: "Prepare a refund for ticket 391", proposal: { ...proposal } }]);
+    });
+    await client.run("authorization = 'Basic demo'; openConversation({id:'refund-chat', title:'Refund'})");
+    const initialCard = client.element("messages").children[1];
+    const buttons = initialCard.children[6].children;
+    const button = buttons[decision === "APPROVE" ? 0 : 1];
+
+    // Fire twice while the first request is in flight to exercise the client-side guard.
+    // 首个请求尚未返回时再次点击，验证客户端的重复提交保护。
+    const first = button.listeners.get("click")();
+    await button.listeners.get("click")();
+    assert.equal(calls, 1);
+    assert.ok(buttons.every(button => button.disabled));
+    releaseDecision();
+    await first;
+
+    const expected = decision === "APPROVE" ? "Completed" : "Rejected";
+    for (let i = 0; i < 55 && client.element("messages").children[1].children[1].textContent !== expected; i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const card = client.element("messages").children[1];
+    assert.equal(card.children[1].textContent, expected);
+    assert.ok(!card.children.some(child => child.className === "proposal-actions"));
+  });
+}
+
+test("switching chats clears old proposal controls before history loads", async () => {
+  const proposal = {
+    id: "old-proposal", version: 1, status: "WAITING_FOR_APPROVAL", ticket_id: "391", order_id: "1001",
+    refund_amount_minor: "12999", currency: "CAD", proposed_ticket_status: "RESOLVED",
+    delivered_at: "2026-11-06T12:00:00Z", expires_at: "2026-11-12T12:00:00Z", policy_version: "DEMO-CAD-30D/v1",
+    customer_reply: "The refund is eligible.",
+  };
+  let resolveHistory;
+  let decisions = 0;
+  const delayedHistory = new Promise(resolve => { resolveHistory = resolve; });
+  const client = createClient(async url => {
+    if (url.startsWith("/proposals/")) {
+      decisions++;
+      return response({});
+    }
+    if (url.startsWith("/conversations/old-chat/messages?")) {
+      return response([{ seq: 1, role: "user", content: "Old request", proposal }]);
+    }
+    return delayedHistory;
+  });
+  await client.run("authorization = 'Basic demo'; openConversation({id:'old-chat', title:'Old'})");
+  const staleButton = client.element("messages").children[1].children[6].children[0];
+  const switching = client.run("openConversation({id:'new-chat', title:'New'})");
+  assert.deepEqual(client.element("messages").children, []);
+
+  // Even a queued click from a detached card cannot decide the old proposal.
+  // 即使已移除卡片仍有排队的点击事件，也不得审批旧方案。
+  await staleButton.listeners.get("click")();
+  assert.equal(decisions, 0);
+  resolveHistory(response([{ seq: 1, role: "user", content: "New request" }]));
+  await switching;
+  assert.equal(client.element("messages").children[0].children[1].textContent, "New request");
+});

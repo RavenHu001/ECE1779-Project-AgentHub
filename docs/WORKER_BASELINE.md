@@ -89,4 +89,28 @@ Use Docker Compose with fixed reply mode and the isolated PostgreSQL test databa
 
 See the [developer implementation guide](developer/zh-CN/AGENTHUB_READ_ONLY_REFUND_CHECK.md) for the data fields, request flow, worker transaction and tests.
 
-Ticket lookup, approval and simulated business writes follow this milestone. Use the [V1 specification draft](developer/zh-CN/AGENTHUB_BACKEND_V1_SPEC.md) when designing the tool results, checkpoints, and approval and resume contracts for that work.
+## Read-only ticket lookup
+
+In fixed mode, seed the linked tickets and orders after creating the two active demo accounts.
+
+```bash
+docker compose run --rm admin seed-demo-tickets alice bob
+```
+
+Sign in as `alice` and send `Look up ticket 391` or `查询工单 391`. The reply includes the ticket status and the refund eligibility of the linked order. Tickets `392` and `393` exercise the expired window and missing delivery date. Ticket `395` belongs to Bob and returns the same response as an unknown ticket when Alice asks for it. A visible ticket with a missing or inaccessible order reports that more information is required.
+
+The seed command can be repeated. It preserves existing order facts and ticket status and rejects conflicting ownership or links. A successful linked-order lookup saves its eligibility result with the chat reply and job success. Ticket lookup leaves business records unchanged.
+
+## Prepare a refund proposal
+
+With the same fixed-mode demo data, send `Prepare a refund for ticket 391` or `处理工单 391`. The worker checks the ticket, linked order, and refund policy, then saves a **Waiting for approval** card with the amount, proposed customer reply, and proposed ticket status. Refresh the page, sign in again, and open the saved conversation to see the same proposal. Ticket `392` returns the expired-window explanation and ticket `393` reports the missing delivery date.
+
+The conversation history API returns the proposal on its originating message. The planning job finishes when it saves the proposal, and the execution remains waiting for approval.
+
+## Approve or reject a refund proposal
+
+Open the pending card and click **Reject** to test the rejection path. The card displays **Rejected**, and ticket `391` stays open. Prepare another proposal and click **Approve**. The card progresses to **Completed**, and the conversation receives a final reply confirming the simulated refund and ticket resolution. Refresh, sign in again, and open the conversation to verify the same decision and result.
+
+The decision endpoint is `POST /proposals/{proposal_id}/decision`. Send `{"version":1,"decision":"APPROVE"}` or `{"version":1,"decision":"REJECT"}`. Repeating the same decision returns the original receipt. A conflicting decision or stale proposal returns HTTP `409`. A proposal for an order whose facts changed becomes invalid. The refund, simulated customer reply, ticket update, and worker result commit in one PostgreSQL transaction. A second proposal for the same order cannot refund it again.
+
+The conversation pauses while its proposal is pending or its approved continuation is running. Other conversations can continue. Expired pending proposals are closed by the worker. When rolling out migration `0006`, replace planning-only workers before enabling approval requests so those workers cannot claim continuation jobs.

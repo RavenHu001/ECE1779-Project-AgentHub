@@ -15,6 +15,8 @@ let pending = null;
 let conversations = [];
 let resumeAfterLogin = false;
 const drafts = new Map();
+const pendingDecisions = new Set();
+const watchedResolutions = new Set();
 
 /** Wait between job polls without blocking other browser interactions.
  * 在两次任务查询之间异步等待，不阻塞浏览器的其他交互。
@@ -35,8 +37,12 @@ async function api(path, body) {
   if (!response.ok) {
     // Present safe English summaries instead of exposing raw server or provider errors.
     // 使用安全的英文错误摘要，不直接展示服务端或模型提供商的原始错误正文。
-    if (response.status === 401) throw new Error("Please check your username and password, then sign in again.");
-    throw new Error("Request failed (" + response.status + "). Please try again.");
+    const message = response.status === 401
+      ? "Please check your username and password, then sign in again."
+      : response.status === 409
+        ? "This conversation changed. Review its latest messages before trying again."
+        : "Request failed (" + response.status + "). Please try again.";
+    throw Object.assign(new Error(message), { status: response.status });
   }
   return response.json();
 }
@@ -77,8 +83,153 @@ function status(text = "", working = false) {
   $("job-status").classList.toggle("working", working);
 }
 
-/** Replace message nodes with plain text and scroll to the newest visible reply.
- * 以纯文本替换消息节点，并滚动到最新的可见回复，避免把用户或模型文本当作 HTML。
+/** Save a decision, then refresh the card only if its conversation is still open.
+ * 保存审批决定；仅在其会话仍处于打开状态时刷新方案卡片。
+ */
+async function decideProposal(proposal, decision, buttons, activeGeneration) {
+  if (generation !== activeGeneration || pendingDecisions.has(proposal.id)) return;
+  pendingDecisions.add(proposal.id);
+  buttons.forEach(button => button.disabled = true);
+  notice();
+  let receipt;
+  try {
+    receipt = await api("/proposals/" + proposal.id + "/decision", { decision, version: proposal.version });
+    if (generation === activeGeneration) await renderMessages(busy);
+  } catch (error) {
+    // A conflicting or uncertain response may still leave a committed decision to display.
+    // 发生冲突或响应不确定时，服务端仍可能已有可展示的已提交决定。
+    if (generation === activeGeneration) {
+      await renderMessages(busy).catch(() => {
+        // The receipt can keep an approved job observable even if the history read fails.
+        // 即使历史读取失败，也可用已收到的批准回执继续跟踪待办。
+        if (generation === activeGeneration && receipt?.resume_job_id) {
+          watchResolution({ ...receipt, status: "QUEUED" });
+        }
+      });
+      if (generation === activeGeneration) notice(error.message);
+    }
+  } finally {
+    pendingDecisions.delete(proposal.id);
+    buttons.forEach(button => button.disabled = false);
+    // A refresh during the request may have rendered a fresh set of disabled buttons.
+    // 请求期间的刷新可能已经渲染了一组新的禁用按钮。
+    const selector = '.proposal-card[data-proposal-id="' + proposal.id + '"] .proposal-actions button';
+    document.querySelectorAll(selector).forEach(button => button.disabled = false);
+  }
+}
+
+/** Follow a saved continuation until it changes state or the user navigates away.
+ * 跟踪已保存的恢复待办，直到状态变化或用户离开当前会话。
+ */
+async function watchResolution(proposal) {
+  const activeGeneration = generation;
+  const key = activeGeneration + ":" + proposal.resume_job_id;
+  if (watchedResolutions.has(key)) return;
+  watchedResolutions.add(key);
+  try {
+    const deadline = Date.now() + 180000;
+    let lastStatus = proposal.status;
+    while (generation === activeGeneration && Date.now() < deadline) {
+      await sleep(750);
+      if (generation !== activeGeneration) return;
+      try {
+        const job = await api("/jobs/" + proposal.resume_job_id);
+        if (generation !== activeGeneration) return;
+        if (job.status !== lastStatus) await renderMessages(busy);
+        if (job.status === "SUCCEEDED" || job.status === "FAILED") return;
+        lastStatus = job.status;
+      } catch (error) {
+        // Brief network or server failures should not hide a later terminal result.
+        // 短暂网络或服务端故障不应让后续终态无法显示。
+        if (error.status && error.status < 500 && error.status !== 429) throw error;
+      }
+    }
+    if (generation === activeGeneration) {
+      notice("Still waiting for the refund result. Reopen this conversation to check again.");
+    }
+  } catch (error) {
+    if (generation === activeGeneration) notice(error.message);
+  } finally {
+    watchedResolutions.delete(key);
+  }
+}
+
+/** Render the saved refund proposal using plain text and its persistent identity.
+ * 使用纯文本和持久化标识渲染已保存的退款方案。
+ */
+function renderProposal(proposal) {
+  const card = document.createElement("article");
+  card.className = "proposal-card";
+  card.setAttribute("data-proposal-id", proposal.id);
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Refund proposal";
+  const state = document.createElement("span");
+  state.className = "proposal-state";
+  state.textContent = {
+    WAITING_FOR_APPROVAL: "Waiting for approval",
+    QUEUED: "Queued for execution",
+    RUNNING: "Applying simulated refund",
+    COMPLETED: "Completed",
+    REJECTED: "Rejected",
+    INVALIDATED: "No longer valid",
+    FAILED: "Execution failed",
+  }[proposal.status];
+
+  // Split the decimal digits without converting BIGINT cents to a JavaScript number.
+  // 直接拆分十进制数字，避免将 BIGINT 金额转换成 JavaScript 浮点数。
+  const digits = proposal.refund_amount_minor.padStart(3, "0");
+  const amount = proposal.currency + " " + digits.slice(0, -2) + "." + digits.slice(-2);
+  const details = document.createElement("dl");
+  for (const [name, value] of [
+    ["Ticket", "#" + proposal.ticket_id],
+    ["Order", "#" + proposal.order_id],
+    ["Simulated refund", amount],
+    ["Order delivered", new Date(proposal.delivered_at).toLocaleDateString()],
+    ["Refund policy", proposal.policy_version],
+    ["Proposed ticket status", proposal.proposed_ticket_status === "RESOLVED" ? "Resolved" : proposal.proposed_ticket_status],
+  ]) {
+    const label = document.createElement("dt");
+    label.textContent = name;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    details.append(label, description);
+  }
+
+  // Render the exact saved draft as text, even when its contents look like markup.
+  // 原样以纯文本显示已保存的草稿，即使其中的内容看起来像 HTML。
+  const draftLabel = document.createElement("h4");
+  draftLabel.textContent = "Proposed customer reply";
+  const draft = document.createElement("blockquote");
+  draft.textContent = proposal.customer_reply;
+  const expiry = document.createElement("p");
+  expiry.className = "proposal-expiry";
+  expiry.textContent = "Approval window ends " + new Date(proposal.expires_at).toLocaleString();
+  card.append(heading, state, details, draftLabel, draft);
+  if (proposal.status === "WAITING_FOR_APPROVAL") {
+    // Only a pending proposal exposes human decision controls.
+    // 只有待审批方案展示人工审批操作。
+    const actions = document.createElement("div");
+    actions.className = "proposal-actions";
+    const cardGeneration = generation;
+    const buttons = [];
+    for (const [decision, label] of [["APPROVE", "Approve"], ["REJECT", "Reject"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = decision === "APPROVE" ? "proposal-approve" : "proposal-reject";
+      button.textContent = label;
+      button.disabled = pendingDecisions.has(proposal.id);
+      button.addEventListener("click", () => decideProposal(proposal, decision, buttons, cardGeneration));
+      buttons.push(button);
+    }
+    actions.append(...buttons);
+    card.append(expiry, actions);
+  }
+  return card;
+}
+
+/** Replace history with plain text messages and any proposals attached to their sources.
+ * 以纯文本消息及其来源消息所附带的方案重建历史。
  */
 function showMessages(rows, waiting = false) {
   $("chat").classList.toggle("has-messages", rows.length > 0 || waiting);
@@ -94,6 +245,12 @@ function showMessages(rows, waiting = false) {
     text.textContent = row.content;
     article.append(label, text);
     $("messages").append(article);
+    // Rebuild cards from the same history snapshot as their originating messages.
+    // 方案卡片和来源消息使用同一份历史快照进行重建。
+    if (row.proposal) {
+      $("messages").append(renderProposal(row.proposal));
+      if (row.proposal.status === "QUEUED" || row.proposal.status === "RUNNING") watchResolution(row.proposal);
+    }
   }
   if (waiting) {
     // The waiting row is local presentation state, never a persisted assistant message.
@@ -240,6 +397,9 @@ async function openConversation(row) {
   if (row.id !== conversation) {
     rememberDraft();
     restoreDraft(row.id);
+    // Clear the previous conversation's controls before the new history request starts.
+    // 发起新会话的历史请求前，清除上一会话中可操作的控件。
+    showMessages([]);
   }
   generation++;
   conversation = row.id;
@@ -426,6 +586,9 @@ $("message-form").addEventListener("submit", async event => {
     // 传输失败时保留原文及待确认标识，避免重试创建重复消息或后台任务。
     status("Needs attention");
     document.querySelector(".pending-message")?.remove();
+    // Another tab may have paused this conversation with a newly saved proposal.
+    // 另一标签页可能刚保存了方案，并因此暂停了当前会话。
+    if (error.status === 409 && conversation) await renderMessages().catch(() => {});
     notice(error.message);
   } finally {
     setBusy(false);

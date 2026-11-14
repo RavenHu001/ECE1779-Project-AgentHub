@@ -51,6 +51,49 @@ class MessageCreate(BaseModel):
         return value
 
 
+# Expose the persisted proposal without the internal order snapshot used for later checks.
+# 返回已保存的方案，隐藏供后续核验使用的内部订单快照。
+class ProposalOut(BaseModel):
+    id: UUID
+    version: Literal[1]
+    status: Literal[
+        "WAITING_FOR_APPROVAL", "QUEUED", "RUNNING", "COMPLETED", "REJECTED", "INVALIDATED", "FAILED"
+    ]
+    # Serialize BIGINT identifiers and amounts as strings so browsers preserve every digit.
+    # 将 BIGINT 编号和金额序列化为字符串，避免浏览器丢失精度。
+    ticket_id: str
+    order_id: str
+    refund_amount_minor: str
+    currency: Literal["CAD"]
+    customer_reply: str
+    proposed_ticket_status: Literal["RESOLVED"]
+    policy_version: str
+    delivered_at: datetime
+    checked_at: datetime
+    expires_at: datetime
+    decision: Literal["APPROVE", "REJECT"] | None = None
+    decided_at: datetime | None = None
+    resume_job_id: UUID | None = None
+
+
+# Only the authenticated employee can supply a decision on the identified version.
+# 仅经过身份验证的员工可对指定版本作出决定。
+class ProposalDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["APPROVE", "REJECT"]
+    version: int = Field(strict=True, gt=0)
+
+
+# Return the original decision receipt on every identical retry.
+# 每次重试相同决定时返回原始审批回执。
+class ProposalDecisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    proposal_id: UUID
+    decision: Literal["APPROVE", "REJECT"]
+    decided_at: datetime
+    resume_job_id: UUID | None
+
+
 # Return saved chat text and its relationship to the originating request.
 # 返回已保存的聊天文本，以及与原始请求的关联。
 class MessageOut(BaseModel):
@@ -62,6 +105,7 @@ class MessageOut(BaseModel):
     seq: int
     reply_to_message_id: UUID | None
     created_at: datetime
+    proposal: ProposalOut | None = None
 
 
 # Return stable identifiers for both a new submission and its retries.

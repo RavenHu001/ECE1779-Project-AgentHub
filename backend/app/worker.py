@@ -12,19 +12,20 @@ from threading import Event, Thread
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import aliased
 
 from app.config import positive_number
 from app.db import SessionLocal
-from app.models import Conversation, Execution, Job, Message, Order
-from app.refund_eligibility import (
-    POLICY_VERSION,
-    evaluate_refund_eligibility,
-    format_refund_reply,
-    parse_refund_order_id,
-)
+from app.models import Conversation, Job, Message
 from app.replies import FixedReply, ReplySettings, RetryableReplyError, build_reply_provider
+from app.resolution_workflow import (
+    append_final_reply,
+    apply_approved_resolution,
+    expire_pending_proposal,
+    unfinished_turn_before,
+)
+from app.support_workflow import check_demo_refund_request, parse_prepare_refund, prepare_refund
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class LostLease(Exception):
 class Claim:
     job_id: UUID
     token: UUID
+    kind: str
 
 
 # Clear all ownership fields together to satisfy the job-state constraint.
@@ -60,20 +62,6 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
     """Atomically claim ready work without overtaking an unfinished conversation turn.
     原子领取已就绪的任务，且不越过同一会话中尚未完成的较早消息。
     """
-    # Match predecessors by source-message sequence, including retries not yet ready.
-    # 根据来源消息的顺序查找前置任务，尚未到重试时间的任务也会阻挡后续消息。
-    earlier_job = aliased(Job)
-    earlier_message = aliased(Message)
-    pending_predecessor = (
-        select(earlier_job.id)
-        .join(earlier_message, earlier_job.source_message_id == earlier_message.id)
-        .where(
-            earlier_message.conversation_id == Message.conversation_id,
-            earlier_message.seq < Message.seq,
-            earlier_job.status.in_(["QUEUED", "RUNNING"]),
-        )
-        .exists()
-    )
     with SessionLocal.begin() as session:
         # Use database time and skip locked jobs so replicas do not share one claim.
         # 使用数据库时间并跳过已锁定任务，避免多个副本领取同一项工作。
@@ -82,7 +70,9 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
             select(Job)
             .join(Message, Job.source_message_id == Message.id)
             .where(
-                ~pending_predecessor,
+                # Keep retries and approvals ahead of every later turn in the same conversation.
+                # 同一会话中的重试与审批均优先于后续轮次。
+                ~unfinished_turn_before(Message.conversation_id, Message.seq),
                 or_(
                     and_(Job.status == "QUEUED", Job.available_at <= now),
                     and_(Job.status == "RUNNING", Job.lease_expires_at <= now),
@@ -112,7 +102,7 @@ def claim_job(owner: str, lease_seconds=60, max_attempts=3) -> Claim | None:
         job.lease_owner = owner
         job.lease_token = uuid4()
         job.lease_expires_at = now + timedelta(seconds=lease_seconds)
-        return Claim(job.id, job.lease_token)
+        return Claim(job.id, job.lease_token, job.kind)
 
 
 # Use live database time so ownership is checked after any lock wait.
@@ -246,12 +236,12 @@ def retry_job(claim: Claim, *, max_attempts):
 
 # Commit the result and completion together, rechecking ownership before success.
 # 一起提交处理结果与完成状态，在标记成功前再次核对领取权。
-def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = False):
-    """Commit one reply, any refund check, and job success under the same claim.
-    在同一次有效领取下提交唯一回复、退款检查结果和任务成功状态。
+def complete_job(claim: Claim, reply: str | None = None, *, check_refund_requests: bool = False):
+    """Commit a reply, proposal, or approved action together with the fenced job result.
+    在同一次有效领取下提交回复、方案或获批动作，以及待办结果。
     """
-    if not reply.strip():
-        raise ValueError("Reply must not be blank")
+    # Lock the current job and load the source of the reply before staging writes.
+    # 在准备写入前锁定当前待办，并读取回复对应的来源消息。
     with SessionLocal.begin() as session:
         job = session.scalar(select(Job).where(owned_job(claim)).with_for_update())
         if not job:
@@ -264,39 +254,29 @@ def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = Fals
         conversation = session.scalar(
             select(Conversation).where(Conversation.id == source.conversation_id).with_for_update()
         )
-        # The order lookup uses the owner of the saved conversation.
-        # 订单查询使用已保存会话的所有者身份。
-        order_id = parse_refund_order_id(source.content) if check_refund_requests else None
-        if order_id is not None:
-            order = session.scalar(
-                select(Order).where(Order.id == order_id, Order.assigned_user_id == conversation.user_id)
-            )
-            checked_at = session.scalar(select(func.clock_timestamp()))
-            result = evaluate_refund_eligibility(order, checked_at)
-            session.add(
-                Execution(
-                    source_message_id=source.id,
-                    requested_order_id=order_id,
-                    outcome=result.outcome,
-                    reason_codes=list(result.reason_codes),
-                    refund_amount_minor=result.refund_amount_minor,
-                    currency=result.currency,
-                    policy_version=POLICY_VERSION,
-                    checked_at=checked_at,
-                )
-            )
-            reply = format_refund_reply(order_id, result)
-        session.add(
-            Message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=reply,
-                seq=conversation.next_message_seq,
-                reply_to_message_id=source.id,
-            )
-        )
-        conversation.next_message_seq += 1
-        conversation.updated_at = func.clock_timestamp()
+        # Continuations use the saved decision. Initial jobs can only query or prepare.
+        # 恢复待办使用已保存的决定，初始待办只能查询或准备方案。
+        if job.kind == "RESUME_EXECUTION":
+            apply_approved_resolution(session, job, conversation)
+        else:
+            if reply is None or not reply.strip():
+                raise ValueError("Reply must not be blank")
+            final_reply = reply
+            if check_refund_requests:
+                action = parse_prepare_refund(source.content)
+                if action is not None:
+                    final_reply = prepare_refund(session, source.id, conversation.user_id, action)
+                else:
+                    final_reply = (
+                        check_demo_refund_request(session, source.id, source.content, conversation.user_id)
+                        or reply
+                    )
+            # A pending card reserves the final reply slot for the decision or execution.
+            # 待审批卡片为审批决定或执行结果保留最终回复位置。
+            if final_reply is not None:
+                append_final_reply(session, conversation, source.id, final_reply)
+            else:
+                conversation.updated_at = func.clock_timestamp()
         session.flush()
         # Recheck live time after lock waits so an expired claim rolls back all its writes.
         # 锁等待后再次按实时时间校验，领取过期时回滚本次写入的所有记录。
@@ -315,8 +295,8 @@ def complete_job(claim: Claim, reply: str, *, check_refund_requests: bool = Fals
             .execution_options(synchronize_session=False)
         ).rowcount
         if changed != 1:
-            # Raising here also rolls back the check result, reply and conversation sequence.
-            # 此处抛出异常，也会回滚检查结果、回复及会话顺序号。
+            # Raising here also rolls back the check result, proposal, reply and sequence.
+            # 此处抛出异常，也会回滚资格记录、方案、退款和回复。
             raise LostLease()
 
 
@@ -353,15 +333,24 @@ def run_once(
     provider=None,
     settings=None,
 ) -> bool:
-    """Process one claim, allowing the documented refund requests in fixed mode.
-    每次处理一项领取，并在固定回复模式下支持文档中的退款检查请求。
+    """Expire a waiting proposal or process one job, including approved continuations.
+    处理一份过期的待审批方案或一个待办，包括获批后的恢复执行。
     """
+    with SessionLocal.begin() as session:
+        if expire_pending_proposal(session):
+            return True
     claim = claim_job(owner, lease_seconds, max_attempts)
     if not claim:
         return False
     provider = provider or FixedReply(reply)
     settings = settings or ReplySettings()
     try:
+        # Applying a saved decision is independent of model configuration and availability.
+        # 执行已保存的决定与模型配置及模型可用性无关。
+        if claim.kind == "RESUME_EXECUTION":
+            complete_job(claim)
+            log.info("job=%s completed resolution continuation", claim.job_id)
+            return True
         with maintain_lease(claim, lease_seconds):
             # Fixed replies ignore history and must preserve the API's 20,000-character limit.
             # 固定回复无需历史，必须保留 API 原有的 20,000 字符接收能力。
@@ -379,6 +368,12 @@ def run_once(
         log.warning("job=%s transient model failure", claim.job_id)
     except LostLease:
         log.warning("job=%s lost ownership; no reply committed", claim.job_id)
+    except OperationalError as exc:
+        # Let the next owner reclaim an interrupted database transaction after its lease expires.
+        # 数据库事务中断时，等待租约到期后由下一次领取接管。
+        if claim.kind != "RESUME_EXECUTION":
+            fail_job(claim, exc)
+        log.warning("job=%s database operation interrupted", claim.job_id)
     except Exception as exc:
         fail_job(claim, exc)
         log.error("job=%s processing failed type=%s", claim.job_id, type(exc).__name__)

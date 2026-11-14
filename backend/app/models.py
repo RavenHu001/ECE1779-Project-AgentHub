@@ -135,8 +135,8 @@ class Message(Base):
 class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
-        UniqueConstraint("source_message_id", name="uq_jobs_source"),
-        CheckConstraint("kind = 'PROCESS_MESSAGE'", name="ck_jobs_kind"),
+        UniqueConstraint("source_message_id", "kind", name="uq_jobs_source_kind"),
+        CheckConstraint("kind IN ('PROCESS_MESSAGE', 'RESUME_EXECUTION')", name="ck_jobs_kind"),
         CheckConstraint("attempts >= 0", name="ck_jobs_attempts"),
         CheckConstraint(
             "(status = 'QUEUED' AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND finished_at IS NULL) OR "
@@ -151,11 +151,11 @@ class Job(Base):
     # Application-generated primary key.
     # 由应用生成的主键。
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    # One processing job per user message in the current milestone.
-    # 当前阶段每条用户消息只对应一项处理待办。
+    # Each source message can have an initial job and one approved continuation.
+    # 每条来源消息可以对应一个初始待办和一个获批后的恢复待办。
     source_message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id", ondelete="RESTRICT"))
-    # Only PROCESS_MESSAGE is implemented.
-    # 当前仅实现 PROCESS_MESSAGE 工作类型。
+    # The job kind determines whether to plan or apply a saved proposal.
+    # 待办类型决定是处理消息，还是执行已保存的方案。
     kind: Mapped[str] = mapped_column(Text, server_default=text("'PROCESS_MESSAGE'"))
     # QUEUED, RUNNING, SUCCEEDED or FAILED.
     # 等待、处理中、成功或失败。
@@ -215,6 +215,23 @@ class Order(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# A synthetic support ticket visible only to the assigned employee account.
+# 一张仅对指派员工账号可见的模拟客服工单。
+class Ticket(Base):
+    __tablename__ = "tickets"
+    __table_args__ = (
+        CheckConstraint("id > 0", name="ck_tickets_id"),
+        CheckConstraint("status IN ('OPEN', 'RESOLVED')", name="ck_tickets_status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    assigned_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    # An open ticket can be recorded before the associated order is known.
+    # 尚未确认关联订单时，仍可登记一张打开的工单。
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id", ondelete="RESTRICT"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'OPEN'"))
+
+
 # A durable eligibility result for one source message, separate from job scheduling.
 # 一条来源消息对应一份持久化资格结果，与待办调度状态分开保存。
 class Execution(Base):
@@ -234,6 +251,11 @@ class Execution(Base):
             name="ck_executions_refund_amount",
         ),
         CheckConstraint("outcome <> 'NOT_FOUND' OR currency IS NULL", name="ck_executions_not_found"),
+        CheckConstraint(
+            "status = 'COMPLETED' OR (outcome = 'ELIGIBLE' AND "
+            "status IN ('WAITING_FOR_APPROVAL', 'APPROVED', 'REJECTED', 'INVALIDATED'))",
+            name="ck_executions_status",
+        ),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     source_message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id", ondelete="RESTRICT"))
@@ -247,3 +269,67 @@ class Execution(Base):
     currency: Mapped[str | None] = mapped_column(Text)
     policy_version: Mapped[str] = mapped_column(Text)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'COMPLETED'"))
+
+
+# A frozen refund proposal linked to its supporting eligibility result.
+# 一份与退款资格记录关联的固定退款方案。
+class ResolutionProposal(Base):
+    __tablename__ = "resolution_proposals"
+    __table_args__ = (
+        UniqueConstraint("execution_id", name="uq_resolution_proposals_execution"),
+        CheckConstraint("customer_reply ~ '[^[:space:]]'", name="ck_resolution_proposals_reply"),
+        CheckConstraint("proposed_ticket_status = 'RESOLVED'", name="ck_resolution_proposals_ticket_status"),
+        CheckConstraint(
+            "jsonb_typeof(expected_order_facts) = 'object'", name="ck_resolution_proposals_facts"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    execution_id: Mapped[UUID] = mapped_column(ForeignKey("executions.id", ondelete="RESTRICT"))
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="RESTRICT"))
+    customer_reply: Mapped[str] = mapped_column(Text)
+    proposed_ticket_status: Mapped[str] = mapped_column(Text)
+    # Keep the facts used for eligibility so execution can later detect stale proposals.
+    # 保存资格判断所用的事实，供后续执行时识别过时方案。
+    expected_order_facts: Mapped[dict] = mapped_column(JSONB)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# One immutable human decision and its original continuation receipt.
+# 保存唯一的人类决定和对应的原始恢复回执。
+class ProposalDecision(Base):
+    __tablename__ = "proposal_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "(decision = 'APPROVE' AND resume_job_id IS NOT NULL) OR "
+            "(decision = 'REJECT' AND resume_job_id IS NULL)",
+            name="ck_proposal_decisions_resume",
+        ),
+    )
+
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("resolution_proposals.id"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    decision: Mapped[str] = mapped_column(Text)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resume_job_id: Mapped[UUID | None] = mapped_column(ForeignKey("jobs.id"), unique=True)
+
+
+# A simulated refund and its customer reply share one atomic business record.
+# 模拟退款和客户回复保存在同一条原子业务记录中。
+class AppliedResolution(Base):
+    __tablename__ = "applied_resolutions"
+    __table_args__ = (
+        CheckConstraint("refund_amount_minor > 0 AND currency = 'CAD'", name="ck_applied_resolutions_refund"),
+        CheckConstraint("customer_reply ~ '[^[:space:]]'", name="ck_applied_resolutions_reply"),
+    )
+
+    # The immutable proposal UUID is the stable action key.
+    # 不可修改的方案 UUID 同时作为稳定的动作去重标识。
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposal_decisions.proposal_id"), primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), unique=True)
+    refund_amount_minor: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(Text)
+    customer_reply: Mapped[str] = mapped_column(Text)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
