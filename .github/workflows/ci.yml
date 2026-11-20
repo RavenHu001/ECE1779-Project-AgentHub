@@ -42,6 +42,12 @@ jobs:
         # PR CI 中的部署测试使用模拟的 Docker 和 HTTP 服务。
         run: |
           for script in deploy/scripts/*.sh; do bash -n "$script"; done
+          caddy_dir="$RUNNER_TEMP/caddy-test"
+          mkdir -p "$caddy_dir"
+          curl -fsSL --retry 2 https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_linux_amd64.tar.gz -o "$caddy_dir/archive"
+          echo "5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb  $caddy_dir/archive" | sha256sum --check --status
+          tar -xzf "$caddy_dir/archive" -C "$caddy_dir" caddy
+          export PATH="$caddy_dir:$PATH"
           python -m unittest discover -s deploy/tests -v
           python deploy/scripts/smoke.py --plan
           python deploy/scripts/monitor.py --plan

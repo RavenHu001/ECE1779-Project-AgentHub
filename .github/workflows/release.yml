@@ -2,6 +2,15 @@ name: Release runtime image
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Publish only, publish and roll out, or restore the recorded application digest
+        type: choice
+        options: [publish, deploy, rollback]
+        default: publish
+      rollback_digest:
+        description: Previous sha256 digest from the manager release record (rollback only)
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +25,7 @@ jobs:
   # Reuse Backend CI so publication uses the runtime image that passed its tests.
   # 复用后端 CI，确保发布的是通过测试的运行镜像。
   required-checks:
+    if: inputs.operation != 'rollback'
     uses: ./.github/workflows/ci.yml
     with:
       export_runtime_image: true
@@ -23,6 +33,7 @@ jobs:
   # Check the Swarm packaging independently of the backend CI job.
   # 在后端 CI 之外单独检查 Swarm 部署所需的文件和脚本。
   delivery-checks:
+    if: inputs.operation != 'rollback'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -49,6 +60,8 @@ jobs:
   # Require both the tested image and the deployment checks before pushing.
   # 测试镜像就绪且部署检查通过后，才推送镜像。
   publish:
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
     needs: [required-checks, delivery-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -63,6 +76,7 @@ jobs:
           name: runtime-image-${{ github.run_id }}
           path: ${{ runner.temp }}/runtime
       - name: Publish the exact runtime image that passed CI
+        id: publish
         # Pull by digest and compare image IDs before publishing deployment instructions.
         # 按摘要拉取镜像并比对 ID，然后输出部署所需的镜像信息。
         env:
@@ -92,6 +106,71 @@ jobs:
             exit 1
           fi
           printf 'Tested revision: `%s`\n\nVersioned image: `%s:%s`\n\nDeploy by digest: `%s`\n' "$GITHUB_SHA" "$image" "$tag" "$image@$digest" >> "$GITHUB_STEP_SUMMARY"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Remove runner registry credentials
         if: always()
         run: docker logout ghcr.io
+
+  deliver:
+    name: ${{ inputs.operation }} ${{ needs.publish.outputs.digest || inputs.rollback_digest }}
+    needs: publish
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main' &&
+          ((inputs.operation == 'deploy' && needs.publish.result == 'success') ||
+           (inputs.operation == 'rollback' && needs.publish.result == 'skipped')) }}
+    environment: production
+    runs-on: ${{ vars.DELIVERY_RUNNER || 'ubuntu-latest' }}
+    concurrency:
+      group: agenthub-production
+      cancel-in-progress: false
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    steps:
+      - name: Verify independent production approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" |
+            python3 -c '
+          import json, os, sys
+          actor = int(os.environ["GITHUB_ACTOR_ID"])
+          reviews = json.load(sys.stdin)
+          def approved(review):
+              reviewer = review.get("user") or {}
+              reviewer_id = reviewer.get("id")
+              return (review.get("state") == "approved" and reviewer.get("type") == "User"
+                      and type(reviewer_id) is int and reviewer_id > 0 and reviewer_id != actor
+                      and any(env.get("name") == "production" for env in review.get("environments", [])))
+          sys.exit(0 if actor > 0 and isinstance(reviews, list) and any(map(approved, reviews)) else 1)
+          '
+      - name: Request the approved manager operation
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          PUBLISHED_DIGEST: ${{ needs.publish.outputs.digest }}
+          ROLLBACK_DIGEST: ${{ inputs.rollback_digest }}
+          TARGET: ${{ vars.DELIVERY_SSH_TARGET }}
+          HOST_KEY: ${{ secrets.DELIVERY_KNOWN_HOSTS }}
+          IDENTITY: ${{ secrets.DELIVERY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          case "$OPERATION" in
+            deploy) DIGEST=$PUBLISHED_DIGEST ;;
+            rollback) DIGEST=$ROLLBACK_DIGEST ;;
+            *) exit 1 ;;
+          esac
+          [[ $DIGEST =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ $TARGET =~ ^[a-z_][a-z0-9_-]*@[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          umask 077
+          dir=$(mktemp -d "$RUNNER_TEMP/agenthub.XXXXXXXX")
+          trap 'rm -f -- "$dir/key" "$dir/hosts"; rmdir -- "$dir"' EXIT
+          printf '%s\n' "$IDENTITY" > "$dir/key"
+          printf '%s\n' "$HOST_KEY" > "$dir/hosts"
+          unset IDENTITY HOST_KEY
+          ssh -F /dev/null -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o HostKeyAlias=agenthub-manager -o UserKnownHostsFile="$dir/hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            -i "$dir/key" "$TARGET" "$OPERATION $DIGEST"

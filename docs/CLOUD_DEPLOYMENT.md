@@ -1,10 +1,6 @@
-# Cloud deployment: Milestone 2
+# Cloud deployment and delivery
 
-This is the reviewable deployment procedure, not evidence of a cloud deployment.
-Milestone 1's actual Docker Desktop results are in
-[LOCAL_VALIDATION.md](../deploy/swarm/LOCAL_VALIDATION.md). Milestone 2 adds scripts
-and manual image publication; it does not provision resources or automatically
-deploy a release. Keep the existing local validation stack unchanged during review.
+Use the staged procedure for initial installation and the approved rolling workflow for application releases. For backups, restore drills and host alerts, see the [cloud operations runbook](CLOUD_OPERATIONS.md). Historical local results are in the [Swarm validation report](../deploy/swarm/LOCAL_VALIDATION.md).
 
 ## Architecture and prerequisites
 
@@ -42,15 +38,14 @@ deployment. Review DigitalOcean's current network and storage configuration firs
 | TCP 2377 | Worker private IP to manager private IP (Swarm control) |
 | TCP/UDP 7946 | Only the two node private IPs (discovery) |
 | UDP 4789 | Only the two node private IPs (overlay traffic) |
-| TCP 18000, or configured API port | Deny public access for this milestone; access using an SSH tunnel |
+| TCP 18000, or configured API port | Deny public access on both nodes. Caddy and SSH use loopback |
+| TCP 80 and 443 | Public to the manager only when serving a domain |
 | TCP 5432 | Never published on either host |
 
 Apply these restrictions with DigitalOcean Cloud Firewalls and appropriate host
 rules. Docker-published ports can bypass ordinary UFW rules; verify reachability
 externally. Do not expose the Docker API or Swarm ports to the public Internet.
-This stack has no HTTPS and uses HTTP Basic authentication. Use a tunnel for the
-demo; public access requires a separately reviewed TLS design. Overlay application
-traffic is not encrypted by this stack; it is restricted to the VPC.
+Use HTTPS or an SSH tunnel for HTTP Basic authentication. Swarm overlay traffic stays within the VPC and uses plaintext in this stack.
 
 On the intended manager, after Docker installation (substitute real private IPs):
 
@@ -113,7 +108,7 @@ tested runtime image; the publisher loads that exact archive and pushes it to:
 ghcr.io/<lowercase-owner>/<lowercase-repository>/backend:sha-<full-commit>-run-<run-id>-<attempt>
 ```
 
-There is no `latest` tag and no deployment job. Only the publishing job has
+The default operation is `publish`. Select `deploy` on protected `main` to request production approval after publication. Only the publishing job has
 `packages: write`; authentication uses the short-lived `GITHUB_TOKEN` via stdin.
 The archive contains the runtime image, not the test image or generated `.env`.
 The artifact expires after one day. Normal PR/push CI behavior is retained;
@@ -131,7 +126,7 @@ different database image on an existing stack, even within major version 17.
 For private GHCR images, log in on each node using a read-only package credential
 through `docker login ghcr.io --password-stdin`; never place it in configuration
 or command arguments. The manager must be logged in for manifest checks and
-`--with-registry-auth`; pre-pull both exact image references on **both** nodes:
+`--with-registry-auth`. For initial installation, pre-pull both exact image references on **both** nodes:
 
 ```bash
 docker pull "$AGENTHUB_IMAGE"
@@ -174,7 +169,108 @@ or overwrite existing secrets. Existing PostgreSQL initialization does not reset
 database passwords, and bootstrap preserves existing account passwords. Secret
 rotation needs a separate coordinated procedure; changing names alone is unsafe.
 
-## Deployment procedure
+## Approved rolling releases and rollback
+
+1. On the manager install a reviewed copy of `deploy/scripts` and `deploy/swarm`
+   under `/opt/agenthub/deploy/`, owned by root. Give the delivery account
+   local Docker access, read access to the deployment settings, verified SSH
+   access to the worker, and read-only GHCR login on both nodes. Give it a
+   private writable `/var/lib/agenthub-delivery` and access to the same
+   `DEPLOY_LOCK_PATH` used by staged deployments and backups.
+2. Install the trusted shell settings from the configuration section at
+   `/etc/agenthub-delivery/config`. Add `IMAGE_REPOSITORY=ghcr.io/<lowercase-owner>/<lowercase-repository>/backend`
+   and set `DEPLOY_TIMEOUT=900` for the two-replica health waits. Use registry
+   and Volume modes. The database digest must already be cached. The delivery
+   command pulls the approved application digest on both verified nodes.
+3. Install a dedicated SSH public key in the delivery account's
+   `authorized_keys` with the following options on the same line as the key.
+   Keep this key restricted to that command and its private half in the
+   GitHub production environment only.
+
+   ```text
+   restrict,command="/usr/bin/timeout --kill-after=10s 55m /bin/bash /opt/agenthub/deploy/scripts/rollout.sh" ssh-ed25519 <public-key>
+   ```
+
+4. Protect `main` and the `production` GitHub Environment. Restrict deployment
+   branches to `main`, require an independent reviewer, prevent self-review
+   and disable admin bypass. Set environment secrets `DELIVERY_SSH_KEY` and
+   `DELIVERY_KNOWN_HOSTS` (one independently verified
+   `agenthub-manager ssh-ed25519 <host-public-key>` line). Set environment
+   variable `DELIVERY_SSH_TARGET=user@manager-host`. Set repository variable
+   `DELIVERY_RUNNER` to a trusted Linux runner label with approved SSH egress,
+   Bash, OpenSSH, gh and Python 3. Limit firewall access to its known source. The
+   default label is `ubuntu-latest`. A plan supporting required reviewers is
+   necessary for delivery. [GitHub environment protections](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+5. Dispatch **Release runtime image** on `main` with operation **deploy**.
+   Check the verified digest in the publish summary, spare capacity for one
+   start-first task, a recent verified backup, and schema compatibility with
+   **both** application versions before approval. The runner checks the
+   production approval on this run and compares the human reviewer's numeric
+   GitHub ID with the dispatcher's. Use a fresh dispatch for retries. The key
+   can request only deployment or rollback of a digest in the manager's configured repository.
+
+Under the shared lock, the manager verifies the existing stack, records the
+healthy baseline and runs one candidate setup task while the old apps serve.
+After a successful exit and scale-down of setup, it rolls API then worker, one
+replica at a time. Each gate checks the actual task digest and container health.
+The final monitor checks API/database connectivity and both nodes. Use the
+authenticated smoke/receipt procedure below to verify a message through the
+published endpoint. [Swarm service update options](https://docs.docker.com/reference/cli/docker/service/update/)
+
+The private `/var/lib/agenthub-delivery/<stack>.release` file contains
+`phase previous-image candidate-image`. A timeout or failed health gate
+leaves recovery information there. For **pending** or **deployed**, dispatch
+**rollback** on `main` with the recorded previous `sha256:…` digest and obtain
+production approval. This rolls only API and worker and repeats the health
+checks. It preserves the applied schema and keeps setup dormant. A second
+deployment is blocked during a pending rollout. Swarm tasks can continue
+after an SSH disconnect.
+
+For **migrating**, inspect setup history, exit status and Alembic state on the
+manager. Both automated actions stop until an operator resolves the migration,
+verifies backward compatibility, returns setup to zero and confirms the old
+app digests are healthy. Archive the interrupted record under the deployment
+lock before a fresh approved dispatch. Use the staged maintenance procedure
+for incompatible changes. Keep the bootstrap configuration's application
+digest synchronized with the healthy release before using that procedure.
+
+## Public HTTPS or SSH-only access
+
+Without a public domain, leave Caddy disabled, keep ports 80/443 closed and
+use `ssh -N -L 127.0.0.1:18000:127.0.0.1:18000 user@manager`.
+With a domain, point its A record (and AAAA only for working IPv6) to the
+manager. Allow TCP 80/443 there and deny public access to the Swarm API port
+on **both** nodes. Install the official Caddy 2 systemd package and preserve
+its writable data directory across restarts for certificates and renewal.
+[Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
+
+Install [Caddyfile](../deploy/caddy/Caddyfile) at `/etc/caddy/Caddyfile`.
+Use `sudo systemctl edit caddy` to supply the following drop-in, substituting
+one public DNS hostname and the deployed API port.
+
+```ini
+[Service]
+Environment=AGENTHUB_DOMAIN=agenthub.example.org
+Environment=API_PUBLISHED_PORT=18000
+```
+
+```bash
+sudo -u caddy env AGENTHUB_DOMAIN=agenthub.example.org API_PUBLISHED_PORT=18000 \
+  caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl daemon-reload
+sudo systemctl enable caddy
+sudo systemctl restart caddy
+curl -sSI http://agenthub.example.org/health
+curl -fsS https://agenthub.example.org/health
+```
+
+Expect a 308 redirect and then healthy API/database JSON. Caddy flushes
+`text/event-stream` responses immediately. Use the HTTPS origin in the
+authenticated SSE replay check and verify event arrival and reconnect cursor.
+Inspect `journalctl -u caddy` for issuance/renewal and verify the public
+certificate chain and expiration after rollout. [Caddy streaming](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming) · [SSE verification](LIVE_UPDATES.md)
+
+## Initial installation and planned downtime
 
 These scripts reuse `deploy/swarm/stack.yaml`; they do not generate another stack
 or rely on `depends_on`. They never create Swarm, labels, storage, secrets or cloud
@@ -204,7 +300,10 @@ The sequence is:
    It executes `alembic upgrade head` followed by `python -m app.manage bootstrap`.
    Only a new task reaching `complete` with exit code zero counts as success;
    stale successes, multiple new tasks, failure and timeout do not.
-3. Return setup to zero. Scale API/worker to the requested counts and verify every
+3. Return setup to zero, wait for its tasks to stop and check the final task history.
+   If another new task appears or the history query fails, API and worker stay at
+   zero. Inspect the migration state before retrying. On success, scale API and
+   worker to the requested counts and verify every
    desired task is running and container-healthy on its actual node. Paused updates
    fail. Default timeout is 300 seconds per wait, adjustable for slower hosts.
 
@@ -333,16 +432,7 @@ python3 deploy/scripts/monitor.py --stack agenthub --expected-nodes 2 --url http
 # On a single-node local validation stack, use --expected-nodes 1.
 ```
 
-This is a manual snapshot, not a continuous monitor, worker-progress check,
-alerting system, or proof of failure recovery. DigitalOcean Metrics and Alerts
-remain a later operator task: select both Droplets and the attached Volume,
-review available CPU, memory, disk, and network metrics, then create threshold
-alerts for sustained CPU/memory pressure, low disk space, and node/volume
-availability. Route notifications to an agreed team channel and validate each
-alert with a safe test before relying on it. Do not use a test that stops services
-or fills the database volume. Keep application health and queue-progress checks
-separate from infrastructure metrics; this milestone does not configure cloud
-resources, notification destinations, thresholds, or alert tests.
+For scheduled service checks, host metrics and Volume alerts, use the [cloud operations runbook](CLOUD_OPERATIONS.md#monitor-both-droplets).
 
 After review, run **one isolated rehearsal** on two native Linux VMs/Droplets,
 using a new stack name, dedicated secrets, unused API port and a fresh mounted
@@ -373,13 +463,15 @@ test filesystem. Provisioning still requires a separate decision.
 
 ## Known limitations and course review
 
+Outstanding acceptance evidence includes a successful [independent restore drill](CLOUD_OPERATIONS.md#test-one-restore-in-isolation),
+public certificate issuance and renewal with authenticated SSE through the deployed hostname,
+and an independently approved deploy and application-only rollback on a two-node rehearsal stack.
+The offline delivery tests simulate GitHub reviews and Swarm tasks. The local
+Caddy test verifies the redirect, a locally issued certificate and SSE event arrival.
+
 One manager is not a control-plane quorum; one pinned DB and its Volume are not
 database HA. Swarm cannot reschedule that DB safely to an unlabeled/empty node.
-Volume attachment is not a backup. This milestone adds no TLS, DigitalOcean
-metrics/alerts, backups, automatic rollback, migration repair, infrastructure
-provisioning or automatic production deployment. The read-only monitor and worker
-health checks establish API/database availability, while the smoke job checks
-processing. There is no multi-architecture image build.
+Caddy on the manager is a single ingress point. Operators provision infrastructure, configure alerts, rehearse recovery and review migration compatibility. The monitor checks availability. The authenticated smoke job checks processing. CI builds linux/amd64.
 The automation intentionally does not change existing DB images, storage paths,
 DB/user names or database secrets; those changes need a separate procedure.
 

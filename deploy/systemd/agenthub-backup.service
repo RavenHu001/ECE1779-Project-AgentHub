@@ -1,0 +1,21 @@
+[Unit]
+Description=AgentHub PostgreSQL logical backup to private Spaces
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=4h
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+UMask=0077
+LimitFSIZE=4G
+PrivateTmp=true
+StateDirectory=agenthub-backup
+StateDirectoryMode=0700
+Environment=TMPDIR=/var/lib/agenthub-backup
+Environment=AWS_SHARED_CREDENTIALS_FILE=/etc/agenthub-backup/credentials
+Environment=AWS_EC2_METADATA_DISABLED=true
+EnvironmentFile=/etc/agenthub-backup/config
+ExecStart=/opt/agenthub-backup/venv/bin/python /opt/agenthub-backup/backup.py --scheduled
+TimeoutStartSec=3h30min
+Restart=no

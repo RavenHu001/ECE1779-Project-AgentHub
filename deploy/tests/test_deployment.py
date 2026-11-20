@@ -135,8 +135,12 @@ def fake_docker(args):
             })
         elif "Replicas" in fmt:
             output = "1" if fault == "armed-setup" or state.get("setup") else "0"
+            if fault == "failed-replica-inspection":
+                code = 1
         elif "RestartPolicy" in fmt:
-            output = "none"
+            output = "on-failure" if fault == "retry-enabled" else "none"
+            if fault == "failed-restart-inspection":
+                code = 1
         elif "UpdateStatus" in fmt:
             output = state.get("update", "paused" if fault == "paused-db" else "completed")
         else:
@@ -145,9 +149,9 @@ def fake_docker(args):
         service = args[-1].removeprefix(stack + "_")
         if service == "setup":
             output = "old-setup"
-            if state.get("launched"):
+            if state.get("launched") and fault != "historical-only":
                 output += "\nnew-setup"
-                if fault == "duplicate-setup":
+                if fault == "duplicate-setup" or (fault == "late-duplicate" and not state["setup"]):
                     output += "\nextra-setup"
         elif service == "db":
             output = "db-1"
@@ -188,7 +192,7 @@ def fake_docker(args):
     elif args[0] == "inspect" and "State.Health" in fmt:
         health = "unhealthy" if fault in ("unhealthy-db", "unhealthy-worker") else "healthy"
         output = f"running|{health}" if ".State.Status" in fmt else health
-        if os.environ.get("TWO_NODES") and args[-1].startswith("container-worker-"):
+        if os.environ.get("TWO_NODES") and args[-1].startswith(("container-api-", "container-worker-")):
             expected_node = "worker" if args[-1].endswith("-1") else "manager"
             if os.environ.get("FAKE_NODE", "manager") != expected_node:
                 code = 90
@@ -587,21 +591,24 @@ wait_healthy "${STACK}_worker" 2
         self.assertEqual(len(self.state()["calls"]), 1)
 
     def test_success_stages_once_and_ignores_historical_success(self):
+        self.two_nodes()
         result = self.run_script(fault="existing-database")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         mutations = self.mutations()
         self.assertEqual(len(mutations), 4)
         self.assertEqual(mutations[0]["args"][:2], ["stack", "deploy"])
         self.assertEqual((mutations[0]["api"], mutations[0]["worker"]), ("0", "0"))
-        self.assertEqual(mutations[1]["args"][:2], ["service", "update"])
+        self.assertEqual(mutations[1]["args"], ["service", "update", "--detach=true", "--replicas", "1", "--force", "offline-test_setup"])
         self.assertIn("offline-test_setup=0", mutations[2]["args"])
         self.assertIn("offline-test_api=2", mutations[3]["args"])
         self.assertIn("offline-test_worker=2", mutations[3]["args"])
         self.assertFalse(self.state()["setup"])
         self.assertIn("exit code 0", result.stdout)
+        for service in ("api", "worker"):
+            self.assertIn(f"offline-test_{service}: 2 healthy tasks", result.stdout)
 
     def test_failed_setup_never_starts_applications_or_retries(self):
-        for fault in ("failed-setup", "nonzero-setup", "duplicate-setup", "timeout-setup"):
+        for fault in ("failed-setup", "nonzero-setup", "duplicate-setup", "timeout-setup", "historical-only"):
             with self.subTest(fault=fault):
                 self.state_path.write_text(json.dumps({"calls": []}))
                 result = self.run_script(fault=fault)
@@ -609,6 +616,22 @@ wait_healthy "${STACK}_worker" 2
                 self.assertFalse(self.state().get("apps", False))
                 self.assertTrue(self.state()["setup"])
                 self.assertEqual(len(self.mutations()), 2)
+
+    def test_setup_requires_successful_replica_and_restart_policy_inspections(self):
+        for fault in ("failed-replica-inspection", "failed-restart-inspection", "retry-enabled"):
+            with self.subTest(fault=fault):
+                self.state_path.write_text(json.dumps({"calls": []}))
+                result = self.run_script(fault=fault)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.state().get("launched"))
+                self.assertFalse(self.state().get("apps"))
+
+    def test_second_setup_task_visible_at_scale_down_blocks_startup(self):
+        result = self.run_script(fault="late-duplicate")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Multiple new setup tasks", result.stderr)
+        self.assertFalse(self.state().get("apps"))
+        self.assertEqual(sum(call["args"][:2] == ["service", "update"] for call in self.mutations()), 1)
 
     def test_unhealthy_or_paused_database_never_runs_setup(self):
         for fault in ("unhealthy-db", "paused-db"):

@@ -16,7 +16,7 @@ The [technology stack guide](docs/TECH_STACK.md) explains the current tools, ver
 
 The API and worker share a Python 3.13 image. PostgreSQL 17 stores users, conversations, messages, jobs, demo orders and refund eligibility results on a persistent volume. Startup waits for database readiness, applies Alembic migrations, initializes the first account, then starts the API and worker.
 
-In fixed mode the worker handles the [simulated refund workflow](docs/WORKER_BASELINE.md#approve-or-reject-a-refund-proposal) and responds to ordinary messages with `Message received.`. Set `REPLY_MODE=openai` and configure a private API key to enable [agent tools and chat](docs/AGENT_EXECUTION.md) with bounded context, calls, time and retries. The browser receives [live updates over SSE](docs/LIVE_UPDATES.md). Backups and production Swarm deployment remain planned work. The included GitHub Actions workflow builds and tests the containers.
+In fixed mode the worker handles the [simulated refund workflow](docs/WORKER_BASELINE.md#approve-or-reject-a-refund-proposal) and responds to ordinary messages with `Message received.`. Set `REPLY_MODE=openai` and configure a private API key to enable text chat with bounded context, output and retries. The browser receives [live updates over SSE](docs/LIVE_UPDATES.md). The [cloud delivery guide](docs/CLOUD_DEPLOYMENT.md) covers reviewed Swarm releases, HTTPS and backup operations.
 
 ## Quick start
 

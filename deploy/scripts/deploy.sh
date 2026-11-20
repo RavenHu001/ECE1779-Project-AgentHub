@@ -46,50 +46,7 @@ wait_stopped "${STACK}_setup"
 wait_healthy "${STACK}_db" 1 "$DB_NODE"
 
 stage=migration-and-bootstrap
-# Require a dormant setup service with retries disabled before launching one task.
-# 启动单次 setup 前，确认服务处于零副本且禁用了自动重启。
-[[ $(docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' "${STACK}_setup") == 0 ]] || fail 'Setup must be at zero before launch'
-[[ $(docker service inspect --format '{{.Spec.TaskTemplate.RestartPolicy.Condition}}' "${STACK}_setup") == none ]] || fail 'Setup must not restart automatically'
-previous=$(docker service ps --no-trunc -q "${STACK}_setup")
-# Exclude historical tasks when verifying the new setup run.
-# 验证本次 setup 执行结果时排除历史任务。
-declare -A seen=()
-while IFS= read -r id; do [[ -z $id ]] || seen["$id"]=1; done <<< "$previous"
-docker service update --detach=true --replicas 1 --force "${STACK}_setup"
-deadline=$((SECONDS + DEPLOY_TIMEOUT))
-selected=''; completed=false
-# Track one new task and use its terminal state and exit code to decide whether to proceed.
-# 跟踪本次新增的唯一任务，根据终态和退出码决定是否继续。
-while (( SECONDS < deadline )); do
-  tasks=$(probe_before_deadline "$deadline" docker service ps --no-trunc -q "${STACK}_setup") || break
-  while IFS= read -r id; do
-    [[ -n $id && -z ${seen[$id]:-} ]] || continue
-    [[ -z $selected || $selected == "$id" ]] || fail 'Multiple new setup tasks detected; stop for review'
-    selected=$id
-  done <<< "$tasks"
-  if [[ -n $selected ]]; then
-    state=$(probe_before_deadline "$deadline" docker inspect --type task --format '{{.Status.State}}' "$selected") || break
-    case $state in
-      complete)
-        exit_code=$(probe_before_deadline "$deadline" docker inspect --type task --format '{{.Status.ContainerStatus.ExitCode}}' "$selected") || break
-        # A completed query must still arrive within the setup wait budget.
-        # 即使查询已完成，结果仍必须在 setup 等待预算内返回。
-        (( SECONDS < deadline )) || break
-        [[ $exit_code == 0 ]] || fail 'Setup returned a nonzero exit code'
-        completed=true; break ;;
-      failed|rejected|orphaned|shutdown) fail "Setup ended unsuccessfully ($state); applications remain stopped" ;;
-    esac
-  fi
-  remaining=$((deadline - SECONDS))
-  (( remaining > 0 )) || break
-  sleep "$((remaining < 2 ? remaining : 2))"
-done
-[[ $completed == true ]] || fail 'Setup timed out; it may still be running. Do not restart it blindly.'
-note 'Alembic migration and bootstrap completed with exit code 0.'
-# Return setup to its dormant state so it is ready for the next deployment.
-# 将 setup 恢复为零副本，为下次部署做好准备。
-docker service scale --detach=true "${STACK}_setup=0"
-wait_stopped "${STACK}_setup"
+run_setup
 
 stage=application-startup
 # Restore the requested replica counts after setup exits successfully.

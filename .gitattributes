@@ -1,6 +1,8 @@
 * text=auto
 *.py text eol=lf
 *.sh text eol=lf
+deploy/systemd/* text eol=lf
+deploy/caddy/Caddyfile text eol=lf
 deploy/swarm/config.example.env text eol=lf
 *.md text eol=lf
 *.yaml text eol=lf

@@ -1,0 +1,9 @@
+{$AGENTHUB_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:{$API_PUBLISHED_PORT:18000} {
+		stream_close_delay 2m
+	}
+}
