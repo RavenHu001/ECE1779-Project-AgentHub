@@ -68,6 +68,11 @@ def test_changed_authorization_never_applies(
     assert rows[0]["proposal"]["status"] == "INVALIDATED"
     assert rows[0]["proposal"]["invalidation_reason"] == reason
     assert rows[0]["proposal"]["revalidated_at"] is not None
+    detail = client.get(f"/executions/{rows[0]['execution_id']}").json()
+    assert detail["status"] == "INVALIDATED"
+    assert detail["invalidation_reason"] == reason
+    assert detail["revalidated_at"] == rows[0]["proposal"]["revalidated_at"]
+    assert detail["result"] is None
     assert "Applied a simulated refund" not in rows[-1]["content"]
     with SessionLocal() as session:
         assert session.scalar(select(AppliedResolution)) is None

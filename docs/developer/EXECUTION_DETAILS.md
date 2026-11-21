@@ -32,6 +32,7 @@ One SQL statement reads the optional records with left joins. It takes the conti
 | --- | --- |
 | `id`, `source_message_id`, `order_id`, `outcome`, `reason_codes`, `refund_amount_minor`, `currency`, `policy_version`, `checked_at` | The saved eligibility record. These fields describe the original check. |
 | `status`, `proposal_id`, `expires_at` | Public workflow state and optional proposal metadata. History cards and execution details share the status mapping. |
+| `revalidated_at`, `invalidation_reason` | The saved proposal verification time and invalidation code. These match the corresponding proposal fields in history. |
 | `decision` | The saved human decision, including `proposal_id`, `decision`, `decided_at`, and `resume_job_id`. |
 | `resume_job_status` | Status of the approved continuation, when present. |
 | `result` | The applied resolution, including the actual refund amount, currency, order and ticket IDs, saved customer reply, and application time. |
@@ -52,6 +53,8 @@ An approval stores its receipt and creates a `RESUME_EXECUTION` job. The public 
 | Continuation saved an invalidation after approval | `INVALIDATED` | `APPROVE` | `SUCCEEDED` | `null` |
 | Approved continuation failed | `FAILED` | `APPROVE` | `FAILED` | `null` |
 | Simulated refund saved | `COMPLETED` | `APPROVE` | `SUCCEEDED` | Applied refund record |
+
+For an `INVALIDATED` proposal, `invalidation_reason` can explain why it closed, such as `PROPOSAL_EXPIRED`, `ORDER_CHANGED`, or `POLICY_CHANGED`. The original eligibility remains in `outcome` and `reason_codes`. A completed refund can also have `revalidated_at` set. Older records and eligibility checks can have both audit fields set to `null`. [Revalidation codes](../AGENT_EXECUTION.md#schema-and-api-handoff)
 
 Use the presence of `result` to display a completed refund and read `result.refund_amount_minor` for the actual amount. With freshly seeded demo data, a check for order `1002` yields `INELIGIBLE` with `WINDOW_EXPIRED` and `result: null`. An approved and applied refund for ticket `391` yields `"12999"` in `CAD`, which displays as CAD 129.99. The top-level `refund_amount_minor` is the amount calculated at eligibility check time. [Demo workflow](../WORKER_BASELINE.md#approve-or-reject-a-refund-proposal)
 

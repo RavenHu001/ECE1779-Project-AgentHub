@@ -157,6 +157,8 @@ def test_refund_check_via_message(client, content, order_id, outcome, reasons, a
         "status": "COMPLETED",
         "proposal_id": None,
         "expires_at": None,
+        "revalidated_at": None,
+        "invalidation_reason": None,
         "decision": None,
         "resume_job_status": None,
         "result": None,

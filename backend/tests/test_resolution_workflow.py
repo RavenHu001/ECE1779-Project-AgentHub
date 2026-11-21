@@ -105,6 +105,7 @@ def test_approved_resolution_preserves_receipts_and_applies_exact_draft(client, 
     assert pending["expires_at"] == proposal["expires_at"]
     assert pending["status"] == "WAITING_FOR_APPROVAL"
     assert pending["decision"] is pending["resume_job_status"] is pending["result"] is None
+    assert pending["revalidated_at"] is pending["invalidation_reason"] is None
     assert decide(client, proposal, auth=("bob", "bob-test-password")).status_code == 404
     assert_conflict(
         decide(client, {**proposal, "version": 2}),
@@ -160,6 +161,9 @@ def test_approved_resolution_preserves_receipts_and_applies_exact_draft(client, 
     assert detail["status"] == "COMPLETED"
     assert detail["resume_job_status"] == "SUCCEEDED"
     assert detail["decision"] == decision
+    assert detail["revalidated_at"] == messages[0]["proposal"]["revalidated_at"]
+    assert detail["revalidated_at"] is not None
+    assert detail["invalidation_reason"] is None
     result = detail["result"]
     applied_at = datetime.fromisoformat(result.pop("applied_at"))
     assert result == {
@@ -385,11 +389,22 @@ def test_expired_or_changed_proposal_never_writes_business_data(client, demo_tic
     source, reply = client.get(path).json()
     assert reply["reply_to_message_id"] == initial["message_id"]
     assert source["proposal"]["status"] == "INVALIDATED"
-    detail = client.get(f"/executions/{source['execution_id']}").json()
+    detail_path = f"/executions/{source['execution_id']}"
+    response = client.get(detail_path)
+    assert response.status_code == 200
+    detail = response.json()
     assert detail["status"] == "INVALIDATED"
+    assert detail["outcome"] == "ELIGIBLE"
+    expected_reason = "ORDER_CHANGED" if change == "changed_order" else "PROPOSAL_EXPIRED"
+    assert detail["invalidation_reason"] == source["proposal"]["invalidation_reason"] == expected_reason
+    assert detail["revalidated_at"] == source["proposal"]["revalidated_at"]
+    assert detail["revalidated_at"] is not None
     assert detail["decision"] == decision
     assert detail["resume_job_status"] == resume_job_status
     assert detail["result"] is None
+    forbidden = client.get(detail_path, auth=("bob", "bob-test-password"))
+    assert forbidden.status_code == 404
+    assert forbidden.json() == {"detail": "Execution not found"}
     with SessionLocal() as session:
         assert session.get(Ticket, 391).status == "OPEN"
         assert session.scalars(select(AppliedResolution)).first() is None
@@ -418,7 +433,12 @@ def test_legacy_invalidated_proposal_without_event_uses_not_pending_conflict(cli
     cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.downgrade(cfg, "0006_approved_resolutions")
     command.upgrade(cfg, "head")
-    assert len(client.get(path).json()) == 2
+    source, _ = client.get(path).json()
+    detail = client.get(f"/executions/{source['execution_id']}")
+    assert detail.status_code == 200
+    saved = detail.json()
+    assert saved["status"] == "INVALIDATED"
+    assert saved["revalidated_at"] is saved["invalidation_reason"] is None
     assert_conflict(
         decide(client, proposal), "PROPOSAL_NOT_PENDING", "Proposal is no longer waiting for approval"
     )

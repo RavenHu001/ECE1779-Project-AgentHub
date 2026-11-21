@@ -157,6 +157,8 @@ class ExecutionDetailOut(BaseModel):
     status: ExecutionStatus
     proposal_id: UUID | None
     expires_at: datetime | None
+    revalidated_at: datetime | None = None
+    invalidation_reason: str | None = None
     decision: ProposalDecisionOut | None
     resume_job_status: JobStatus | None
     result: AppliedResolutionOut | None

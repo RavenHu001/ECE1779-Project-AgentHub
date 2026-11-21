@@ -173,6 +173,8 @@ def read_execution_detail(session: Session, execution_id: UUID, user_id: UUID) -
         status=_execution_status(execution, job),
         proposal_id=proposal.id if proposal else None,
         expires_at=proposal.expires_at if proposal else None,
+        revalidated_at=execution.revalidated_at,
+        invalidation_reason=execution.invalidation_reason,
         decision=ProposalDecisionOut.model_validate(decision) if decision else None,
         resume_job_status=job.status if job else None,
         result=result,
