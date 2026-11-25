@@ -1,6 +1,8 @@
 name: Release runtime image
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       operation:
@@ -16,16 +18,16 @@ permissions:
   contents: read
 
 concurrency:
-  # Serialize publication on a ref without canceling an active release.
-  # 同一 Git 引用上的发布串行执行，已有发布继续运行。
+  # Queue releases on the same ref so pushes do not replace a pending rollback.
+  # 同一 Git 引用上的发布按队列执行，推送不会替换等待中的回滚。
   group: release-runtime-${{ github.ref }}
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   # Reuse Backend CI so publication uses the runtime image that passed its tests.
   # 复用后端 CI，确保发布的是通过测试的运行镜像。
   required-checks:
-    if: inputs.operation != 'rollback'
+    if: github.event_name == 'push' || inputs.operation != 'rollback'
     uses: ./.github/workflows/ci.yml
     with:
       export_runtime_image: true
@@ -33,7 +35,7 @@ jobs:
   # Check the Swarm packaging independently of the backend CI job.
   # 在后端 CI 之外单独检查 Swarm 部署所需的文件和脚本。
   delivery-checks:
-    if: inputs.operation != 'rollback'
+    if: github.event_name == 'push' || inputs.operation != 'rollback'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -115,11 +117,13 @@ jobs:
         run: docker logout ghcr.io
 
   deliver:
-    name: ${{ inputs.operation }} ${{ needs.publish.outputs.digest || inputs.rollback_digest }}
+    name: >-
+      ${{ github.event_name == 'push' && 'deploy' || inputs.operation }}
+      ${{ needs.publish.outputs.digest || inputs.rollback_digest }}
     needs: publish
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' &&
-          ((inputs.operation == 'deploy' && needs.publish.result == 'success') ||
+          (((github.event_name == 'push' || inputs.operation == 'deploy') && needs.publish.result == 'success') ||
            (inputs.operation == 'rollback' && needs.publish.result == 'skipped')) }}
     environment: production
     runs-on: ${{ vars.DELIVERY_RUNNER || 'ubuntu-latest' }}
@@ -152,7 +156,7 @@ jobs:
       - name: Request the approved manager operation
         shell: bash
         env:
-          OPERATION: ${{ inputs.operation }}
+          OPERATION: ${{ github.event_name == 'push' && 'deploy' || inputs.operation }}
           PUBLISHED_DIGEST: ${{ needs.publish.outputs.digest }}
           ROLLBACK_DIGEST: ${{ inputs.rollback_digest }}
           TARGET: ${{ vars.DELIVERY_SSH_TARGET }}

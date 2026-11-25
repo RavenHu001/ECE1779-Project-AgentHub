@@ -101,7 +101,8 @@ Volume mount persistence remains a host responsibility after preflight finishes.
 
 ## Image delivery and registry access
 
-The manually triggered **Release runtime image** workflow reuses Backend CI:
+The **Release runtime image** workflow runs on pushes to `main` and can also run
+on manual dispatch. It reuses Backend CI:
 browser regressions, Compose configuration, runtime/test image build, backend
 lint/tests against the isolated test DB, and live API/worker smoke. Separate
 offline deployment tests and Swarm config parsing must also pass. CI exports the
@@ -111,8 +112,11 @@ tested runtime image; the publisher loads that exact archive and pushes it to:
 ghcr.io/<lowercase-owner>/<lowercase-repository>/backend:sha-<full-commit>-run-<run-id>-<attempt>
 ```
 
-The default operation is `publish`. Select `deploy` on protected `main` to request production approval after publication. Only the publishing job has
-`packages: write`; authentication uses the short-lived `GITHUB_TOKEN` via stdin.
+Each push to protected `main` requests production approval after publication.
+Manual dispatch defaults to `publish`. Choose `deploy` on `main` to explicitly
+request production approval, for example when retrying a failed deployment. Only
+the publishing job has `packages: write`. Authentication uses the short-lived
+`GITHUB_TOKEN` via stdin.
 The archive contains the runtime image, not the test image or generated `.env`.
 The artifact expires after one day. Normal PR/push CI behavior is retained;
 artifact export is enabled only by the reusable workflow caller. The workflow
@@ -199,18 +203,21 @@ rotation needs a separate coordinated procedure; changing names alone is unsafe.
    and disable admin bypass. Set environment secrets `DELIVERY_SSH_KEY` and
    `DELIVERY_KNOWN_HOSTS` (one independently verified
    `agenthub-manager ssh-ed25519 <host-public-key>` line). Set environment
-   variable `DELIVERY_SSH_TARGET=user@manager-host`. Set repository variable
-   `DELIVERY_RUNNER` to a trusted Linux runner label with approved SSH egress,
-   Bash, OpenSSH, gh and Python 3. Limit firewall access to its known source. The
+   variable `DELIVERY_SSH_TARGET=user@manager-host`. If using a dedicated runner,
+   set `DELIVERY_RUNNER` under **Settings → Secrets and variables → Actions →
+   Variables**. Use a trusted Linux runner label with approved SSH egress, Bash,
+   OpenSSH, gh and Python 3. Limit firewall access to its known source. The
    default label is `ubuntu-latest`. A plan supporting required reviewers is
    necessary for delivery. [GitHub environment protections](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
-5. Dispatch **Release runtime image** on `main` with operation **deploy**.
+5. Open the **Release runtime image** run triggered by the push to `main`.
+   For an explicit retry, dispatch the workflow on `main` with operation **deploy**.
    Check the verified digest in the publish summary, spare capacity for one
    start-first task, a recent verified backup, and schema compatibility with
    **both** application versions before approval. The runner checks the
    production approval on this run and compares the human reviewer's numeric
-   GitHub ID with the dispatcher's. Use a fresh dispatch for retries. The key
-   can request only deployment or rollback of a digest in the manager's configured repository.
+   GitHub ID with the ID of the actor who triggered the run. Use a fresh dispatch
+   for retries. The key can request only deployment or rollback of a digest in the
+   manager's configured repository.
 
 Under the shared lock, the manager verifies the existing stack, records the
 healthy baseline and runs one candidate setup task while the old apps serve.
