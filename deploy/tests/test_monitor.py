@@ -153,5 +153,12 @@ class MonitorTests(unittest.TestCase):
                     self.assertEqual(monitor.main(args), 1)
 
 
+class ProviderModeTests(unittest.TestCase):
+    def test_wrong_provider_fails_the_deployment_health_gate(self):
+        with patch.object(monitor, "monitor", return_value=({"reply_mode": "fixed"}, {}, [])):
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(monitor.main(["--reply-mode", "openai"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

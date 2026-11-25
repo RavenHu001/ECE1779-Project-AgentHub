@@ -1,5 +1,8 @@
 # Cloud deployment and delivery
 
+See [cloud OpenAI configuration](CLOUD_OPENAI.md) for secret provisioning and provider
+rollout, and [browser sessions](BROWSER_SESSIONS.md) for persistent login.
+
 Use the staged procedure for initial installation and the approved rolling workflow for application releases. For backups, restore drills and host alerts, see the [cloud operations runbook](CLOUD_OPERATIONS.md). Historical local results are in the [Swarm validation report](../deploy/swarm/LOCAL_VALIDATION.md).
 
 ## Architecture and prerequisites

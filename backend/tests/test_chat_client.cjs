@@ -11,6 +11,74 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../app/static/chat.js"), "utf8");
 
+
+test("a refreshed page restores the HTTP-only session without storing credentials", async () => {
+  const requests = [];
+  const client = createClient(async (url, options) => {
+    requests.push([url, options]);
+    if (url === "/me") return response({ id: "alice-id", username: "alice" });
+    if (url === "/conversations") return response([{ id: "saved", title: "Saved chat" }]);
+    throw new Error(url);
+  }, { sessionFetch: true, localStorage: { getItem() {}, setItem() { throw new Error("No credentials in storage"); } } });
+  await until(() => visibleText(client.element("conversations")).includes("Saved chat"));
+  assert.equal(client.element("account-name").textContent, "alice");
+  assert.equal(client.run("authorization.id"), "alice-id");
+  assert.equal(requests[0][1].credentials, "same-origin");
+  assert.equal(requests[0][1].headers.Authorization, undefined);
+  assert.equal(requests[1][1].headers["X-AgentHub-Account"], "alice-id");
+});
+
+test("a failed server logout keeps the account visible and a retry revokes it before clearing", async () => {
+  let attempts = 0;
+  const client = createClient(async url => {
+    if (url === "/me") return { ok: false, status: 401 };
+    if (url === "/auth/logout") return ++attempts === 1 ? { ok: false, status: 503 } : { ok: true, status: 204 };
+    throw new Error(url);
+  }, { sessionFetch: true });
+  client.run("activateAccount({id:'alice-id',username:'alice'}); drafts.set('a',{content:'private'});");
+  const logout = client.element("sign-out").listeners.get("click");
+  await logout();
+  assert.equal(client.run("accountId"), "alice-id");
+  assert.match(client.element("notice").textContent, /Sign-out could not be completed/);
+  await logout();
+  assert.equal(client.run("accountId"), null);
+  assert.equal(client.run("drafts.size"), 0);
+});
+
+test("a late session restoration cannot sign the user back in after logout", async () => {
+  let finish;
+  const client = createClient(async url => {
+    if (url === "/me") return new Promise(resolve => { finish = resolve; });
+    if (url === "/auth/logout") return { ok: true, status: 204 };
+    throw new Error(url);
+  }, { sessionFetch: true });
+  client.run("activateAccount({id:'alice-id',username:'alice'})");
+  await client.element("sign-out").listeners.get("click")();
+  finish(response({ id: "alice-id", username: "alice" }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(client.run("authorization"), null);
+  assert.equal(client.run("accountId"), null);
+});
+
+test("login sends the password once and subsequent requests use the cookie account context", async () => {
+  const seen = [];
+  const client = createClient(async (url, options) => {
+    seen.push([url, options]);
+    if (url === "/auth/login") return response({ id: "alice-id", username: "alice" });
+    if (url === "/conversations") return response([]);
+    throw new Error(url);
+  });
+  client.element("username").value = "alice";
+  client.element("password").value = "private-test-password";
+  await client.element("login-form").listeners.get("submit")({ preventDefault() {} });
+  assert.equal(seen[0][0], "/auth/login");
+  assert.equal(JSON.parse(seen[0][1].body).password, "private-test-password");
+  assert.equal(seen[0][1].headers.Authorization, undefined);
+  assert.equal(seen[0][1].headers["X-AgentHub-Request"], "1");
+  assert.equal(seen[1][1].headers["X-AgentHub-Account"], "alice-id");
+  assert.equal(client.element("password").value, "");
+});
+
 // Read visible strings from the minimal DOM without interpreting them as HTML.
 // 从最小 DOM 读取可见文本，不将其解释为 HTML。
 function visibleText(element) {
@@ -256,6 +324,8 @@ function createClient(handler, extraGlobals = {}) {
    */
   async function fetchClient(url, options) {
     if (url === "/health") return response({ reply_mode: "fixed" });
+    if (url === "/me" && !extraGlobals.sessionFetch) return { ok: false, status: 401 };
+    if (url === "/auth/logout" && !extraGlobals.sessionFetch) return { ok: true, status: 204 };
     if (url.endsWith("/messages?after_seq=0&limit=1") && !extraGlobals.snapshotFetch)
       return { ok: true, headers: { get: () => "v2:0" } };
     return handler(url, options);
@@ -363,7 +433,7 @@ test("signing out clears drafts and pending submissions before another account s
   const { client } = uncertainSubmissions();
   await client.send("Private draft");
   client.run("newChat()");
-  client.element("sign-out").listeners.get("click")();
+  await client.element("sign-out").listeners.get("click")();
   client.run("authorization = 'Basic another-account';");
   await client.run("openConversation({ id: 'chat-a', title: 'Chat A' })");
   assert.equal(client.element("message").value, "");
@@ -1001,7 +1071,7 @@ test("a 401 stream asks for sign-in and resumes live updates after signing in", 
       if (opens === 1) return { ok: false, status: 401 };
       return sseResponse(options.signal).response;
     }
-    if (url === "/me") return response({ id: "alice-id", username: "alice" });
+    if (url === "/auth/login") return response({ id: "alice-id", username: "alice" });
     if (url.includes("/messages?") || url === "/conversations") return response([]);
     throw new Error("Unexpected request: " + url);
   }, streamingGlobals);
@@ -1028,10 +1098,11 @@ test("a 401 stream asks for sign-in and resumes live updates after signing in", 
 
 test("signing in as another account after a 401 clears the old workspace during a send", async t => {
   let stream, loginOpened = 0, streamOpens = 0, historyReads = 0, aliceJobPolls = 0;
-  let aliceSubmission;
+  let aliceSubmission, signedInAccount = "alice";
   const client = createClient(async (url, options) => {
-    const isBob = options.headers.Authorization === "Basic " + Buffer.from("bob:password").toString("base64");
-    if (url === "/me") return response(isBob ? { id: "bob-id", username: "bob" } : { id: "alice-id", username: "alice" });
+    if (url === "/auth/login") signedInAccount = JSON.parse(options.body).username;
+    const isBob = signedInAccount === "bob";
+    if (url === "/auth/login") return response(isBob ? { id: "bob-id", username: "bob" } : { id: "alice-id", username: "alice" });
     if (url === "/conversations") return response(isBob ? [{ id: "chat-b", title: "Bob chat" }] : [{ id: "chat-a", title: "Alice chat" }]);
     if (url === "/conversations/chat-a/events?version=2") {
       streamOpens++;

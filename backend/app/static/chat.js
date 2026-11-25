@@ -1,13 +1,15 @@
 "use strict";
 
-// Keep credentials and submission state in this page's memory; only theme preferences persist.
-// 凭据与提交状态只保存在当前页面内存中，只有主题偏好会写入浏览器本地存储。
+// The browser owns an HTTP-only session cookie; this page stores only account identity and drafts.
+// 浏览器持有 HTTP-only 会话 cookie；页面仅保存账号标识和草稿。
 /** Resolve one stable element by its HTML id.
  * 根据 HTML id 查找对应的页面元素。
  */
 const $ = id => document.getElementById(id);
 let authorization = null;
 let accountId = null;
+let authGeneration = 0;
+let authBusy = false;
 let conversation = null;
 let busy = false;
 let generation = 0;
@@ -42,10 +44,18 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 /** Call an authenticated same-origin endpoint with a bounded request timeout.
  * 携带内存中的认证信息调用同源接口，并限制单次请求的等待时间。
  */
+function authHeaders(credentials) {
+  const headers = { "X-AgentHub-Request": "1" };
+  if (typeof credentials === "string") headers.Authorization = credentials;
+  else if (credentials?.id) headers["X-AgentHub-Account"] = credentials.id;
+  return headers;
+}
+
 async function api(path, body, credentials = authorization, method = body === undefined ? "GET" : "POST") {
   const response = await fetch(path, {
     method,
-    headers: { Authorization: credentials, "Content-Type": "application/json" },
+    headers: { ...authHeaders(credentials), "Content-Type": "application/json" },
+    credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store",
     signal: AbortSignal.timeout(15000),
@@ -286,7 +296,7 @@ async function runStream(current) {
     current.controller.signal.addEventListener("abort", stop);
     let idle = setTimeout(stop, STREAM_IDLE_MS);
     try {
-      const headers = { Authorization: current.authorization };
+      const headers = authHeaders(current.authorization);
       const base = "/conversations/" + current.conversation;
       if (current.cursor === null) {
         // Read a first-page snapshot before subscribing. The ready refresh loads full history.
@@ -1085,21 +1095,17 @@ function openLogin() {
 // 先验证身份，再加载该账号的会话；若登录由发送动作触发，则继续原来的提交。
 $("login-form").addEventListener("submit", async event => {
   event.preventDefault();
+  if (authBusy) return;
+  authBusy = true;
+  const attempt = ++authGeneration;
   notice("", "login-error");
   $("login-submit").disabled = true;
   try {
-    // Basic credentials stay in memory; remove the password from the form after validation.
-    // Basic 认证信息只驻留内存；验证成功后立即从表单中移除明文密码。
-    const credentials = "Basic " + btoa($("username").value + ":" + $("password").value);
-    const account = await api("/me", undefined, credentials);
-    authorization = credentials;
-    if (accountId !== null && account.id !== accountId) clearAccountWorkspace();
-    accountId = account.id;
-    $("password").value = "";
-    $("account-name").textContent = account.display_name || account.username;
-    $("account-action").textContent = "Sign out";
-    $("sign-out").setAttribute("aria-label", "Sign out");
-    $("avatar").textContent = (account.display_name || account.username).slice(0, 2).toUpperCase();
+    const account = await api("/auth/login", {
+      username: $("username").value, password: $("password").value,
+    }, null);
+    if (attempt !== authGeneration) return;
+    activateAccount(account);
     await listConversations();
     $("login-panel").close();
     // Resume live updates for a conversation left open when the previous session expired.
@@ -1111,8 +1117,33 @@ $("login-form").addEventListener("submit", async event => {
     } else $("message").focus();
   } catch (error) {
     notice(error.message, "login-error");
-  } finally { $("login-submit").disabled = false; }
+  } finally { authBusy = false; $("login-submit").disabled = false; }
 });
+
+function activateAccount(account) {
+  // Each login gets a new identity object so late reads cannot replace a newer session's UI.
+  // 每次登录创建新的标识对象，防止旧请求覆盖新会话界面。
+  authorization = { id: account.id };
+  if (accountId !== null && account.id !== accountId) clearAccountWorkspace();
+  accountId = account.id;
+  $("password").value = "";
+  $("account-name").textContent = account.display_name || account.username;
+  $("account-action").textContent = "Sign out";
+  $("sign-out").setAttribute("aria-label", "Sign out");
+  $("avatar").textContent = (account.display_name || account.username).slice(0, 2).toUpperCase();
+}
+
+async function restoreSession() {
+  const attempt = authGeneration;
+  try {
+    const account = await api("/me", undefined, null);
+    if (attempt !== authGeneration || authorization) return;
+    activateAccount(account);
+    await listConversations();
+  } catch (error) {
+    if (attempt === authGeneration && error.status !== 401) notice("Could not restore your session. Please sign in.");
+  }
+}
 
 // Keep backdrop interactions separate from dismissal so selecting text cannot close the dialog.
 // 遮罩交互不负责关闭弹窗，避免拖选文字时误关闭。
@@ -1126,8 +1157,20 @@ loginPanel.addEventListener("close", () => {
 // Sign-out clears every account-scoped draft before returning to the unauthenticated workspace.
 // 退出时先清除属于该账号的全部草稿，再回到未登录工作区，防止下个账号读取旧内容。
 $("new-chat").addEventListener("click", newChat);
-$("sign-out").addEventListener("click", () => {
+$("sign-out").addEventListener("click", async () => {
   if (!authorization && accountId === null) { openLogin(); return; }
+  if (authBusy) return;
+  authBusy = true;
+  ++authGeneration;
+  $("sign-out").disabled = true;
+  stopStream();
+  try {
+    await api("/auth/logout", {}, authorization);
+  } catch {
+    notice("Sign-out could not be completed. Please try again.");
+    if (conversation) startStream();
+    return;
+  } finally { authBusy = false; $("sign-out").disabled = false; }
   authorization = null;
   accountId = null;
   $("account-name").textContent = "Your workspace";
@@ -1312,3 +1355,4 @@ fetch("/health", { signal: AbortSignal.timeout(10000) }).then(response => {
 setSidebar(!matchMedia("(max-width: 640px)").matches);
 drawConversations();
 resizeComposer();
+restoreSession();

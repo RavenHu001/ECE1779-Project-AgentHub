@@ -220,7 +220,7 @@ class DurableConversationStream:
 
 
 async def conversation_events(
-    stream: ConversationStream | DurableConversationStream, is_disconnected
+    stream: ConversationStream | DurableConversationStream, is_disconnected, is_authorized=None
 ) -> AsyncIterator[str]:
     """Yield frames until the client leaves, the stream reaches its lifetime, or the database fails.
     持续输出事件帧，直到客户端断开、流达到最长时长或数据库出错。
@@ -233,6 +233,10 @@ async def conversation_events(
         if await is_disconnected():
             return
         try:
+            # Recheck cookie sessions during an open stream, including logout and the absolute expiry.
+            # 在流持续期间复查 cookie 会话，包括退出登录和固定到期时间。
+            if is_authorized is not None and not await run_in_threadpool(is_authorized):
+                return
             frames = await run_in_threadpool(stream.poll)
         except ConversationRemoved:
             yield encode("conversation.deleted", json.dumps({"conversation_id": str(stream.conversation_id)}))

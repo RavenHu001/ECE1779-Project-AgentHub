@@ -35,6 +35,7 @@ docker() {
         *Replicas*) echo "$API_REPLICAS" ;;
         *UpdateStatus*) echo "${UPDATE_STATUS:-completed}" ;;
         *ContainerSpec.Image*) cat "$svc" ;;
+        *ContainerSpec.Secrets*) printf '%s\n' "${OLD_OPENAI_SECRET:-}" ;;
         *) exit 90 ;;
       esac ;;
     'service update')
@@ -75,6 +76,37 @@ rollout "$ACTION" "$STATE_DIR/release"
 
 
 class RolloutTests(unittest.TestCase):
+    def test_openai_rollout_mounts_key_only_on_workers_and_survives_image_rollback(self):
+        settings = dict(REPLY_MODE="openai", OPENAI_MODEL="gpt-5.4-mini", OPENAI_API_KEY_SECRET="test-openai-v2",
+                        OLD_OPENAI_SECRET="test-openai-v1")
+        result = self.invoke(**settings)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        updates = [line for line in self.trace.read_text().splitlines() if line.startswith("service update")]
+        self.assertIn("REPLY_MODE=openai", updates[0])
+        self.assertNotIn("--secret-add", updates[0])
+        self.assertIn("SESSION_COOKIE_SECURE=true", updates[0])
+        self.assertIn("--secret-rm test-openai-v1", updates[1])
+        self.assertIn("--secret-add source=test-openai-v2,target=openai_api_key", updates[1])
+        self.assertIn("OPENAI_MODEL=gpt-5.4-mini", updates[1])
+        self.assertIn("cat /run/secrets/openai_api_key", updates[1])
+        self.assertEqual(self.invoke("rollback", OLD, **settings).returncode, 0)
+
+    def test_same_image_still_applies_provider_configuration_without_running_migrations(self):
+        result = self.invoke(image=OLD, REPLY_MODE="openai", OPENAI_MODEL="gpt-5.4-mini",
+                             OPENAI_API_KEY_SECRET="test-openai")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("setup ", self.trace.read_text())
+        self.assertEqual(self.trace.read_text().count("REPLY_MODE=openai"), 2)
+        self.assertFalse(self.record.exists())
+
+    def test_fixed_fallback_removes_model_secret_and_does_not_read_it(self):
+        result = self.invoke(REPLY_MODE="fixed", OLD_OPENAI_SECRET="test-openai")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        update = next(line for line in self.trace.read_text().splitlines() if line.endswith("test_worker"))
+        self.assertIn("--secret-rm test-openai", update)
+        self.assertNotIn("--secret-add", update)
+        self.assertNotIn("cat /run/secrets/openai_api_key", update)
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

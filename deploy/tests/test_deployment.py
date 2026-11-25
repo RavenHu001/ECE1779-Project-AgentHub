@@ -109,7 +109,7 @@ def fake_docker(args):
         else:
             code = 90
     elif args[:2] == ["secret", "inspect"]:
-        code = int(fault == "missing-secret")
+        code = int(fault == "missing-secret" or (fault == "missing-openai-secret" and "offline-openai" in args))
     elif args[:2] == ["image", "inspect"]:
         output = json.dumps([
             {"Os": "linux", "Architecture": "amd64", "Config": {"Env": []}},
@@ -222,6 +222,27 @@ BASH = resolve_bash_path()
 
 @unittest.skipUnless(BASH, "Bash is required")
 class DeploymentTests(unittest.TestCase):
+    def test_openai_missing_secret_fails_before_any_mutation(self):
+        self.env.update(REPLY_MODE="openai", OPENAI_API_KEY_SECRET="offline-openai")
+        result = self.run_script(fault="missing-openai-secret")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OpenAI Swarm secret is missing", result.stderr)
+        calls = [row["args"] for row in self.state()["calls"]]
+        self.assertIn(["secret", "inspect", "offline-openai"], calls)
+        self.assertFalse(any(args[:2] in (["stack", "deploy"], ["service", "update"], ["service", "scale"]) for args in calls))
+
+    def test_openai_plan_requires_a_secret_name_and_selects_the_overlay(self):
+        self.env.update(REPLY_MODE="openai", OPENAI_API_KEY_SECRET="")
+        result = self.run_script(mode="--plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.state()["calls"], [])
+        self.env["OPENAI_API_KEY_SECRET"] = "offline-openai"
+        result = self.run_script(mode="--plan")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.state()["calls"]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["args"][-1].endswith("openai.yaml"))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

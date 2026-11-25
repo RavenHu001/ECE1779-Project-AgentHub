@@ -5,14 +5,42 @@ import base64
 import hashlib
 import secrets
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import User
+from app.models import AuthSession, User
 
-basic = HTTPBasic()
+SESSION_COOKIE = "agenthub_session"
+SESSION_SECONDS = 24 * 60 * 60
+
+
+class QuietHTTPBasic(HTTPBasic):
+    """Preserve API clients without asking the browser to open a second login dialog.
+    保留 API 客户端认证，同时避免浏览器弹出第二个登录框。
+    """
+
+    async def __call__(self, request: Request) -> HTTPBasicCredentials | None:
+        try:
+            return await super().__call__(request)
+        except HTTPException:
+            raise HTTPException(401, "Invalid credentials") from None
+
+
+basic = QuietHTTPBasic(auto_error=False)
+
+
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def require_browser_request(request: Request):
+    """Require a non-simple header so cross-site forms cannot use browser cookies.
+    要求非简单请求头，防止跨站表单使用浏览器 cookie 执行操作。
+    """
+    if request.headers.get("X-AgentHub-Request") != "1":
+        raise HTTPException(403, "Browser request header required")
 
 
 # Store the algorithm, random salt and digest; never the original password.
@@ -43,10 +71,46 @@ _dummy_hash = hash_password(secrets.token_urlsafe(32))
 
 # Load a trusted account from credentials; never accept an owner ID from the client.
 # 根据凭据加载可信账号，不信任客户端传入的归属用户编号。
-def current_user(credentials: HTTPBasicCredentials = Depends(basic)) -> User:
+def authenticate(username: str, password: str) -> User:
     with SessionLocal() as session:
-        user = session.scalar(select(User).where(User.username == credentials.username.strip().lower()))
-        valid = verify_password(credentials.password, user.password_hash if user else _dummy_hash)
+        user = session.scalar(select(User).where(User.username == username.strip().lower()))
+        valid = verify_password(password, user.password_hash if user else _dummy_hash)
         if not user or not valid or not user.is_active:
-            raise HTTPException(401, "Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+            raise HTTPException(401, "Invalid credentials")
         return user
+
+
+def session_user(token_hash: str) -> User | None:
+    with SessionLocal() as session:
+        row = session.execute(
+            select(User, AuthSession.password_fingerprint)
+            .join(AuthSession, AuthSession.user_id == User.id)
+            .where(
+                AuthSession.token_hash == token_hash,
+                AuthSession.expires_at > func.clock_timestamp(),
+                User.is_active.is_(True),
+            )
+        ).one_or_none()
+        if row is None or not secrets.compare_digest(row[1], digest(row[0].password_hash)):
+            return None
+        return row[0]
+
+
+def current_user(request: Request, credentials: HTTPBasicCredentials | None = Depends(basic)) -> User:
+    # Explicit API credentials take precedence and never fall back to an unrelated browser session.
+    # 显式 API 凭据优先，失败时不会退回到无关的浏览器会话。
+    if request.headers.get("Authorization") is not None:
+        if credentials is None:
+            raise HTTPException(401, "Invalid credentials")
+        return authenticate(credentials.username, credentials.password)
+    token = request.cookies.get(SESSION_COOKIE, "")
+    user = session_user(digest(token)) if token and len(token) <= 256 else None
+    if user is None:
+        raise HTTPException(401, "Sign in required")
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        require_browser_request(request)
+    expected = request.headers.get("X-AgentHub-Account")
+    if expected is not None and expected != str(user.id):
+        raise HTTPException(401, "Account changed; sign in again")
+    request.state.session_hash = digest(token)
+    return user

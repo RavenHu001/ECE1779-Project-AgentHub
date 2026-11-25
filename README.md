@@ -1,5 +1,9 @@
 # AgentHub Backend
 
+Browser login persists for 24 hours through an HTTP-only cookie shared across API
+replicas. See [browser sessions](docs/BROWSER_SESSIONS.md) and
+[cloud OpenAI setup](docs/CLOUD_OPENAI.md) for deployment and verification.
+
 AgentHub is a University of Toronto ECE1779 team project. This repository implements authenticated conversations, durable message submission, PostgreSQL-backed jobs, and a separate worker with optional OpenAI tool selection and chat. The default fixed-reply mode requires no API key and makes no paid model requests.
 
 For a fresh checkout or Codex session, start with the [development handoff](docs/DEVELOPMENT_HANDOFF.md).

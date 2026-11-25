@@ -14,7 +14,9 @@ manually to run migrations and bootstrap. All services use an overlay network;
 routing mesh. The local `compose.yaml` remains the development setup; the steps
 below describe the manual Milestone 1 procedure.
 
-This milestone uses `REPLY_MODE=fixed` only. No model key is required or mounted.
+The base stack defaults to `REPLY_MODE=fixed` for this local rehearsal. No model
+key is required or mounted. Cloud OpenAI uses the optional overlay and worker-only
+secret described in [CLOUD_OPENAI.md](../../docs/CLOUD_OPENAI.md).
 HTTPS, automated delivery, DigitalOcean alerts, backups, and database failover are outside
 this milestone. A read-only point-in-time monitor is documented in
 [CLOUD_DEPLOYMENT.md](../../docs/CLOUD_DEPLOYMENT.md#read-only-monitoring). Commands below are Bash commands, run from the repository root

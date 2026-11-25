@@ -15,6 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.auth import router as auth_router
 from app.db import SessionLocal, engine, get_session
 from app.event_store import (
     EventToAppend,
@@ -67,12 +68,13 @@ from app.schemas import (
     ProposalDecisionOut,
     SubmissionOut,
 )
-from app.security import current_user
+from app.security import current_user, session_user
 
 app = FastAPI(
     title="AgentHub Backend", version="0.2.0", description="Durable chat jobs with optional model replies."
 )
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+app.include_router(auth_router)
 log = logging.getLogger(__name__)
 
 
@@ -124,10 +126,11 @@ def health():
 # Return the authenticated account without its password hash.
 # 返回已验证账号的信息，不返回密码哈希。
 @app.get("/me", description="Return the authenticated account without password or credential fields.")
-def me(user: User = Depends(current_user)):
+def me(response: Response, user: User = Depends(current_user)):
     """Return only the authenticated account's public identity fields.
     仅返回已验证账号的公开身份字段，不包含密码哈希或其他认证信息。
     """
+    response.headers["Cache-Control"] = "no-store"
     return {"id": user.id, "username": user.username, "display_name": user.display_name}
 
 
@@ -450,8 +453,13 @@ async def stream_events(
             return DurableConversationStream(conversation_id, seq)
 
     stream = await run_in_threadpool(open_stream)
+    token_hash = getattr(request.state, "session_hash", None)
     return StreamingResponse(
-        conversation_events(stream, request.is_disconnected),
+        conversation_events(
+            stream,
+            request.is_disconnected,
+            (lambda: session_user(token_hash) is not None) if token_hash else None,
+        ),
         media_type="text/event-stream",
         # Disable caching and proxy buffering so each frame reaches the browser promptly.
         # 禁用缓存与代理缓冲，使每个事件帧及时到达浏览器。

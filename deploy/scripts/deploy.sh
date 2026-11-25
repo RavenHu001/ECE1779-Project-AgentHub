@@ -37,7 +37,7 @@ target_worker=$WORKER_REPLICAS
 stage=database-startup
 # Quiesce API and worker tasks before running migrations.
 # 执行数据库迁移之前，先停止 API 和 worker 任务。
-API_REPLICAS=0 WORKER_REPLICAS=0 docker stack deploy --detach=true --resolve-image never --with-registry-auth -c "$STACK_FILE" "$STACK"
+API_REPLICAS=0 WORKER_REPLICAS=0 docker stack deploy --detach=true --resolve-image never --with-registry-auth "${STACK_CONFIG_ARGS[@]}" "$STACK"
 wait_stopped "${STACK}_api"
 wait_stopped "${STACK}_worker"
 wait_stopped "${STACK}_setup"

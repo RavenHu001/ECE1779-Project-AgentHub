@@ -12,9 +12,9 @@ x-app: &app
     PGDATABASE: ${POSTGRES_DB:-agenthub}
     PGUSER: ${POSTGRES_USER:-agenthub}
     PGCONNECT_TIMEOUT: "5"
-    # Use the fixed provider for local and cloud deployments of this stack.
-    # 此 stack 在本地和云端都使用固定回复提供方。
-    REPLY_MODE: fixed
+    # Local rehearsals stay offline; cloud configuration explicitly enables OpenAI.
+    # 本地演练保持离线；云端配置显式启用 OpenAI。
+    REPLY_MODE: ${REPLY_MODE:-fixed}
   secrets:
     - source: db_password
       target: db_password
@@ -148,6 +148,9 @@ services:
 
   api:
     <<: *app
+    environment:
+      <<: *app-env
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
     command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000"]
     ports:
       # The routing mesh publishes this port on every Swarm node.

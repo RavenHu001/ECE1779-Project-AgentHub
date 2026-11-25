@@ -29,6 +29,14 @@ configure() {
   export IMAGE_MODE=${IMAGE_MODE:-registry} STORAGE_MODE=${STORAGE_MODE:-volume}
   export DEPLOY_TIMEOUT=${DEPLOY_TIMEOUT:-300}
   export DEPLOY_LOCK_PATH=${DEPLOY_LOCK_PATH:-/var/lock/agenthub-deploy.lock}
+  export REPLY_MODE=${REPLY_MODE:-fixed} OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.4-mini}
+  [[ $REPLY_MODE == fixed || $REPLY_MODE == openai ]] || fail 'REPLY_MODE must be fixed or openai'
+  if [[ $REPLY_MODE == openai ]]; then
+    [[ ${OPENAI_API_KEY_SECRET:-} =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || fail 'Set OPENAI_API_KEY_SECRET to a Swarm secret name'
+    [[ $OPENAI_API_KEY_SECRET != "$DB_PASSWORD_SECRET" && $OPENAI_API_KEY_SECRET != "$BOOTSTRAP_PASSWORD_SECRET" ]] || fail 'Use an independent OpenAI secret'
+    [[ $OPENAI_MODEL =~ ^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$ ]] || fail 'Invalid OPENAI_MODEL'
+    export OPENAI_API_KEY_SECRET
+  fi
   # Validate the identifiers used in service names, secrets, and account settings.
   # 校验用于服务名、密钥和账号设置的标识符。
   for name in STACK DB_PASSWORD_SECRET BOOTSTRAP_PASSWORD_SECRET POSTGRES_DB POSTGRES_USER BOOTSTRAP_USERNAME; do
@@ -79,9 +87,11 @@ configure() {
   need docker; need python3; need timeout
   SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   STACK_FILE="$SCRIPT_DIR/../swarm/stack.yaml"
+  STACK_CONFIG_ARGS=(-c "$STACK_FILE")
+  if [[ $REPLY_MODE == openai ]]; then STACK_CONFIG_ARGS+=(-c "$SCRIPT_DIR/../swarm/openai.yaml"); fi
   # Never print rendered configuration or feed it through interpolation twice.
   # 隐藏解析后的配置，避免将解析结果再次传入部署命令并重复插值。
-  docker stack config -c "$STACK_FILE" >/dev/null || fail 'Stack configuration is invalid'
+  docker stack config "${STACK_CONFIG_ARGS[@]}" >/dev/null || fail 'Stack configuration is invalid'
 }
 
 # Run a command locally for the manager or over SSH for the registered worker.
@@ -286,6 +296,9 @@ inspect_cluster() {
     (( ${#NODES[@]} == 1 )) || fail 'Local images and directory-only storage are restricted to a one-node rehearsal'
   fi
   docker secret inspect "$DB_PASSWORD_SECRET" "$BOOTSTRAP_PASSWORD_SECRET" >/dev/null || fail 'Required Swarm secret is missing'
+  if [[ $REPLY_MODE == openai ]]; then
+    docker secret inspect "$OPENAI_API_KEY_SECRET" >/dev/null || fail 'OpenAI Swarm secret is missing'
+  fi
   # These are read-only checks. The operator must mount storage and pull images first.
   # 这些检查只读。操作者须先挂载存储并拉取镜像。
   on_node "$DB_NODE" bash -s -- "$POSTGRES_DATA_PATH" "$STORAGE_MODE" "${POSTGRES_VOLUME_MOUNT:-}" "${POSTGRES_VOLUME_UUID:-}" <<'STORAGE' || fail 'Database storage check failed on the labeled node'

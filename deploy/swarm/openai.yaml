@@ -1,0 +1,21 @@
+version: "3.8"
+
+# Layer over stack.yaml only for the cloud model provider. Values stay in Swarm secrets.
+# 仅在云端使用模型时叠加到 stack.yaml；密钥值保存在 Swarm secret 中。
+services:
+  worker:
+    environment:
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+    secrets:
+      - source: openai_api_key
+        target: openai_api_key
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - 'export PGPASSWORD="$$(cat /run/secrets/db_password)"; test -n "$$PGPASSWORD"; export OPENAI_API_KEY="$$(cat /run/secrets/openai_api_key)"; test -n "$$OPENAI_API_KEY"; exec "$$@"'
+      - --
+
+secrets:
+  openai_api_key:
+    external: true
+    name: ${OPENAI_API_KEY_SECRET:?Set OPENAI_API_KEY_SECRET to an existing Swarm secret name}

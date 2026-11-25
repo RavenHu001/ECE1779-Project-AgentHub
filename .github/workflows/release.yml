@@ -55,7 +55,10 @@ jobs:
           POSTGRES_DATA_PATH: /mnt/validation/postgres
           DB_PASSWORD_SECRET: validation-db
           BOOTSTRAP_PASSWORD_SECRET: validation-bootstrap
-        run: docker stack config -c deploy/swarm/stack.yaml > /dev/null
+          OPENAI_API_KEY_SECRET: validation-openai
+        run: |
+          docker stack config -c deploy/swarm/stack.yaml > /dev/null
+          REPLY_MODE=openai docker stack config -c deploy/swarm/stack.yaml -c deploy/swarm/openai.yaml > /dev/null
 
   # Require both the tested image and the deployment checks before pushing.
   # 测试镜像就绪且部署检查通过后，才推送镜像。

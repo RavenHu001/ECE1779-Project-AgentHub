@@ -59,6 +59,19 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
+class AuthSession(Base):
+    """Store only token digests for browser sessions shared by all API replicas.
+    仅保存浏览器会话令牌的摘要，供所有 API 副本共享。
+    """
+
+    __tablename__ = "auth_sessions"
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    password_fingerprint: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 # A user-owned chat with a counter for allocating message order.
 # 属于某个用户的聊天，并保存消息顺序号计数器。
 class Conversation(Base):

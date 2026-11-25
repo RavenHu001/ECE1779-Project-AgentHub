@@ -250,6 +250,7 @@ def main(argv=None):
     parser.add_argument("--worker-replicas", type=int)
     parser.add_argument("--expected-nodes", type=int, default=2, help="Expected Ready and Active Swarm nodes (1 or 2)")
     parser.add_argument("--timeout", type=int, default=10, help="Per-request timeout in seconds")
+    parser.add_argument("--reply-mode", choices=("fixed", "openai"), help="Expected API provider configuration")
     args = parser.parse_args(argv)
     try:
         require(bool(re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.stack)), "Invalid Swarm stack name")
@@ -267,6 +268,7 @@ def main(argv=None):
             print("PLAN: GET /health, read AgentHub service replica counts, inspect API/worker/PostgreSQL task and container health on their Swarm nodes, and check the expected node count/readiness. No changes made.")
             return 0
         health, replicas, nodes = monitor(args.stack, base_url, api_replicas, worker_replicas, args.expected_nodes, args.timeout)
+        require(args.reply_mode is None or health.get("reply_mode") == args.reply_mode, "API reply mode differs from the requested deployment")
         print(f"PASS: API and PostgreSQL connectivity; reply_mode={health.get('reply_mode', 'unknown')}")
         print("PASS: " + ", ".join(f"{name}={running}/{desired}" for name, (running, desired) in replicas.items()))
         print("PASS: every running API, worker, and PostgreSQL task/container is healthy")

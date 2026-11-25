@@ -41,7 +41,7 @@ def test_upgrade_from_either_branch_preserves_records(accounts, revision):
     command.upgrade(cfg, "head")
     with SessionLocal() as session:
         assert session.scalars(text("SELECT version_num FROM alembic_version")).all() == [
-            "0009_conversation_management"
+            "0010_browser_sessions"
         ]
         assert session.get(Conversation, cid) is not None
         assert session.get(Conversation, cid).is_pinned is False
