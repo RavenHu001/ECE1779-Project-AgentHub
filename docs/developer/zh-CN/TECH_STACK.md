@@ -40,7 +40,7 @@ FastAPI 组织请求处理，Uvicorn 提供服务器；Pydantic 检查接口数�
 | Docker | 构建运行镜像和独立测试镜像 | 将 Python 环境与代码一起打包，使队员和 CI 使用同一套应用运行配置 |
 | Docker Compose | 连接 API、worker、数据库、迁移和账号初始化服务 | 用共用配置声明启动顺序、网络、数据卷和隔离项目名，可用于个人环境或共享服务器 |
 | Git | 管理代码、迁移、依赖和文档版本 | 通过分支和经过审阅的提交协调多人修改 |
-| GitHub Actions | 构建容器、检查代码、运行数据库测试并验证真实链路 | 在集成前为 PR 提供共同验证流程；当前尚未配置远程自动部署 |
+| GitHub Actions | 测试 PR 和合并后的提交，发布镜像到 GHCR 并申请生产审批 | 审批后通过 SSH 按已发布的镜像摘要执行 Swarm 滚动更新 |
 | uv 与 pip | uv 生成解析后的依赖文件；pip 在镜像构建时安装 | 维护者集中解析版本，Docker 安装审阅后的清单。uv 是维护工具，不是运行时服务 |
 
 项目要求 Docker Engine 已运行，并使用支持 `--wait` 的 Compose v2 或以上版本。应用没有固定宿主机 Docker 和 uv 的版本。基础镜像为 `python:3.13-slim-bookworm`、`postgres:17-bookworm`；这些标签限定版本系列，并不是固定镜像摘要。

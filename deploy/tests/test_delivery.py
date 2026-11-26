@@ -26,7 +26,8 @@ SCRIPTS = ROOT / "deploy/scripts"
 HARNESS = r'''
 source "$SCRIPT/rollout.sh"
 cd "$STATE_DIR"
-release_preflight() { :; }
+REPLY_MODE=${REPLY_MODE:-fixed}
+release_preflight() { verify_live_provider; }
 docker() {
   local svc=${!#}
   case "$1 $2" in
@@ -35,6 +36,10 @@ docker() {
         *Replicas*) echo "$API_REPLICAS" ;;
         *UpdateStatus*) echo "${UPDATE_STATUS:-completed}" ;;
         *ContainerSpec.Image*) cat "$svc" ;;
+        *REPLY_MODE=*)
+          if [[ $4 == *"REPLY_MODE=${LIVE_MODE:-$REPLY_MODE}\""* ]]; then echo match; fi ;;
+        *OPENAI_MODEL=*)
+          if [[ $4 == *"OPENAI_MODEL=${LIVE_MODEL:-$OPENAI_MODEL}\""* ]]; then echo match; fi ;;
         *ContainerSpec.Secrets*) printf '%s\n' "${OLD_OPENAI_SECRET:-}" ;;
         *) exit 90 ;;
       esac ;;
@@ -76,28 +81,48 @@ rollout "$ACTION" "$STATE_DIR/release"
 
 
 class RolloutTests(unittest.TestCase):
-    def test_openai_rollout_mounts_key_only_on_workers_and_survives_image_rollback(self):
+    def test_openai_rollout_preserves_worker_mount_and_model_through_rollback(self):
         settings = dict(REPLY_MODE="openai", OPENAI_MODEL="gpt-5.4-mini", OPENAI_API_KEY_SECRET="test-openai-v2",
-                        OLD_OPENAI_SECRET="test-openai-v1")
+                        OLD_OPENAI_SECRET="test-openai-v2")
         result = self.invoke(**settings)
         self.assertEqual(result.returncode, 0, result.stderr)
         updates = [line for line in self.trace.read_text().splitlines() if line.startswith("service update")]
         self.assertIn("REPLY_MODE=openai", updates[0])
         self.assertNotIn("--secret-add", updates[0])
         self.assertIn("SESSION_COOKIE_SECURE=true", updates[0])
-        self.assertIn("--secret-rm test-openai-v1", updates[1])
-        self.assertIn("--secret-add source=test-openai-v2,target=openai_api_key", updates[1])
+        self.assertNotIn("--secret-rm", updates[1])
+        self.assertNotIn("--secret-add", updates[1])
         self.assertIn("OPENAI_MODEL=gpt-5.4-mini", updates[1])
         self.assertIn("cat /run/secrets/openai_api_key", updates[1])
-        self.assertEqual(self.invoke("rollback", OLD, **settings).returncode, 0)
+        result = self.invoke("rollback", OLD, **settings)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        worker_update = self.trace.read_text().splitlines()[-2]
+        self.assertIn("OPENAI_MODEL=gpt-5.4-mini", worker_update)
+        self.assertNotIn("--secret-rm", worker_update)
+        self.assertNotIn("--secret-add", worker_update)
 
     def test_same_image_still_applies_provider_configuration_without_running_migrations(self):
         result = self.invoke(image=OLD, REPLY_MODE="openai", OPENAI_MODEL="gpt-5.4-mini",
-                             OPENAI_API_KEY_SECRET="test-openai")
+                             OPENAI_API_KEY_SECRET="test-openai", OLD_OPENAI_SECRET="test-openai")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("setup ", self.trace.read_text())
         self.assertEqual(self.trace.read_text().count("REPLY_MODE=openai"), 2)
         self.assertFalse(self.record.exists())
+
+    def test_provider_drift_blocks_delivery_before_migration(self):
+        cases = [
+            dict(REPLY_MODE="fixed", LIVE_MODE="openai"),
+            dict(REPLY_MODE="openai", OPENAI_MODEL="wrong", LIVE_MODEL="live-model"),
+            dict(REPLY_MODE="openai", OPENAI_MODEL="live-model",
+                 OPENAI_API_KEY_SECRET="wrong", OLD_OPENAI_SECRET="live-secret"),
+        ]
+        for settings in cases:
+            with self.subTest(settings=settings):
+                result = self.invoke(**settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("differs from the running", result.stderr)
+                self.assertFalse(self.record.exists())
+                self.assertEqual(self.trace.read_text(), "")
 
     def test_fixed_fallback_removes_model_secret_and_does_not_read_it(self):
         result = self.invoke(REPLY_MODE="fixed", OLD_OPENAI_SECRET="test-openai")
@@ -280,6 +305,38 @@ source "$SCRIPT/check_volume.sh"
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_pr_runs_only_ci_and_main_publishes_after_one_ci(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
+        self.assertIn("\n  pull_request:\n", ci)
+        self.assertNotIn("\n  push:", ci)
+        self.assertNotIn("packages: write", ci)
+        self.assertNotIn("environment: production", ci)
+        self.assertNotIn("pull_request", release)
+        self.assertIn("\n  push:\n    branches: [main]", release)
+        self.assertEqual(release.count("uses: ./.github/workflows/ci.yml"), 1)
+        self.assertNotIn("unittest discover", release)
+        publish = release.split("\n  publish:\n")[1].split("\n  deliver:\n")[0]
+        self.assertIn("needs: required-checks", publish)
+        self.assertIn("FROM agenthub-ci-backend:dev", publish)
+        self.assertIn("github.event_name == 'push' || inputs.operation == 'deploy'", release)
+        self.assertIn("OPERATION: ${{ inputs.operation || 'deploy' }}", release)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback'", release)
+        self.assertNotIn("cancel-in-progress: true", release)
+        self.assertIn("group: agenthub-production\n      queue: max\n      cancel-in-progress: false", release)
+        self.assertLess(release.index("Verify independent production approval"), release.index("Request the approved manager operation"))
+
+    def test_superseded_or_unverifiable_main_revision_stops_before_ssh(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
+        step = workflow.split("      - name: Check that the approved deployment is still current\n")[1]
+        self.assertIn("if: inputs.operation != 'rollback'", step.split("run: |", 1)[0])
+        script = textwrap.dedent(step.split("        run: |\n")[1].split("      - name:", 1)[0])
+        for current, status, accepted in [("abc", "0", True), ("def", "0", False), ("abc", "1", False)]:
+            env = dict(os.environ, GITHUB_REPOSITORY="team/agenthub", GITHUB_SHA="abc", CURRENT=current, STATUS=status)
+            fake = 'gh() { echo "$CURRENT"; return "$STATUS"; }\n'
+            result = subprocess.run([BASH, "-c", fake + script], env=env, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode == 0, accepted)
+
     def test_approval_command_requires_independent_production_reviewer(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
         step = workflow.split("      - name: Verify independent production approval\n", 1)[1]

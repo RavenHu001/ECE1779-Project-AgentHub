@@ -2,8 +2,6 @@ name: Backend CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
   # Release runs can request the tested image as a workflow artifact.
   # 发布流程可请求将已测试镜像保存为工作流产物。
@@ -18,15 +16,17 @@ permissions:
   contents: read
 
 concurrency:
-  # A newer change replaces only the older CI run for the same Git reference.
-  # 新提交只替代同一 Git 引用的旧 CI 检查。
-  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede outdated PR checks. Each main release tests its own commit.
+  # 淘汰同一 PR 的过期检查，每次主分支发布独立测试对应提交。
+  group: backend-ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   containers-and-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      REPLY_MODE: fixed
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,6 +51,17 @@ jobs:
           python -m unittest discover -s deploy/tests -v
           python deploy/scripts/smoke.py --plan
           python deploy/scripts/monitor.py --plan
+      - name: Parse both Swarm configurations
+        env:
+          AGENTHUB_IMAGE: ghcr.io/example/agenthub/backend:validation
+          POSTGRES_IMAGE: postgres:17-bookworm
+          POSTGRES_DATA_PATH: /mnt/validation/postgres
+          DB_PASSWORD_SECRET: validation-db
+          BOOTSTRAP_PASSWORD_SECRET: validation-bootstrap
+          OPENAI_API_KEY_SECRET: validation-openai
+        run: |
+          docker stack config -c deploy/swarm/stack.yaml > /dev/null
+          REPLY_MODE=openai docker stack config -c deploy/swarm/stack.yaml -c deploy/swarm/openai.yaml > /dev/null
       - name: Browser client state regressions
         # Exercise Unicode titles, uncertain retries, account cleanup, and stale history responses.
         # 验证 Unicode 标题、待确认重试、账号退出清理以及过期历史响应。

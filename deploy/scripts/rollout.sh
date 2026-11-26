@@ -19,6 +19,25 @@ release_preflight() {
   check_existing
   [[ $(docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' "${STACK}_setup") == 0 ]] ||
     fail 'Delivery requires a dormant setup service'
+  verify_live_provider
+}
+
+# Check only the intended settings. Never print service environments or key material.
+# 仅比对目标配置，不输出服务环境变量或密钥内容。
+verify_live_provider() {
+  local role template mounted
+  printf -v template '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{if eq . "REPLY_MODE=%s"}}match{{end}}{{end}}' "$REPLY_MODE"
+  for role in api worker; do
+    [[ $(docker service inspect --format "$template" "${STACK}_$role") == match ]] ||
+      fail "Configured reply mode differs from the running $role service"
+  done
+  if [[ $REPLY_MODE == openai ]]; then
+    printf -v template '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{if eq . "OPENAI_MODEL=%s"}}match{{end}}{{end}}' "$OPENAI_MODEL"
+    [[ $(docker service inspect --format "$template" "${STACK}_worker") == match ]] ||
+      fail 'Configured model differs from the running worker'
+    mounted=$(docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "openai_api_key"}}{{println .SecretName}}{{end}}{{end}}' "${STACK}_worker")
+    [[ $mounted == "$OPENAI_API_KEY_SECRET" ]] || fail 'Configured OpenAI secret differs from the running worker mount'
+  fi
 }
 
 # Reconcile provider settings on existing services; image updates alone do not apply YAML.
@@ -30,17 +49,16 @@ provider_update_args() {
     update_args+=(--env-add SESSION_COOKIE_SECURE=true)
     return
   fi
-  mounted=$(docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "openai_api_key"}}{{.SecretName}}{{"\n"}}{{end}}{{end}}' "$service") || fail 'Cannot inspect worker secret mounts'
-  while IFS= read -r secret; do
-    [[ -n $secret ]] || continue
-    update_args+=(--secret-rm "$secret")
-  done <<< "$mounted"
   command='export PGPASSWORD="$(cat /run/secrets/db_password)"; test -n "$PGPASSWORD"; '
   update_args+=(--env-rm OPENAI_API_KEY)
   if [[ ${REPLY_MODE:-fixed} == openai ]]; then
-    update_args+=(--secret-add "source=$OPENAI_API_KEY_SECRET,target=openai_api_key" --env-add "OPENAI_MODEL=$OPENAI_MODEL")
+    update_args+=(--env-add "OPENAI_MODEL=$OPENAI_MODEL")
     command+='export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"; test -n "$OPENAI_API_KEY"; '
   else
+    mounted=$(docker service inspect --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "openai_api_key"}}{{println .SecretName}}{{end}}{{end}}' "$service") || fail 'Cannot inspect worker secret mounts'
+    while IFS= read -r secret; do
+      [[ -z $secret ]] || update_args+=(--secret-rm "$secret")
+    done <<< "$mounted"
     update_args+=(--env-rm OPENAI_MODEL)
   fi
   command+='exec "$@"'
@@ -124,9 +142,12 @@ delivery_main() {
   local action=${BASH_REMATCH[1]} digest=${BASH_REMATCH[2]}
   source /etc/agenthub-delivery/config
   export WORKER_SSH
+  [[ -n ${REPLY_MODE:-} ]] || fail 'Explicitly configure the running REPLY_MODE for delivery'
+  [[ $REPLY_MODE != openai || -n ${OPENAI_MODEL:-} ]] || fail 'Explicitly configure the running OPENAI_MODEL for delivery'
   [[ $IMAGE_REPOSITORY =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+/backend$ ]] || fail 'Invalid GHCR repository'
   export AGENTHUB_IMAGE="$IMAGE_REPOSITORY@$digest"
   configure
+  [[ $API_REPLICAS == 2 && $WORKER_REPLICAS == 2 ]] || fail 'Production delivery requires two API and two worker replicas'
   [[ $IMAGE_MODE == registry && $STORAGE_MODE == volume ]] || fail 'Delivery requires registry images and Volume storage'
   umask 077
   exec 9>>"$DEPLOY_LOCK_PATH"

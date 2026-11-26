@@ -1,6 +1,8 @@
 name: Release runtime image
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       operation:
@@ -15,57 +17,19 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # Serialize publication on a ref without canceling an active release.
-  # 同一 Git 引用上的发布串行执行，已有发布继续运行。
-  group: release-runtime-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   # Reuse Backend CI so publication uses the runtime image that passed its tests.
   # 复用后端 CI，确保发布的是通过测试的运行镜像。
   required-checks:
-    if: inputs.operation != 'rollback'
+    if: github.ref == 'refs/heads/main' && inputs.operation != 'rollback'
     uses: ./.github/workflows/ci.yml
     with:
       export_runtime_image: true
 
-  # Check the Swarm packaging independently of the backend CI job.
-  # 在后端 CI 之外单独检查 Swarm 部署所需的文件和脚本。
-  delivery-checks:
-    if: inputs.operation != 'rollback'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Check deployment scripts without a deployment
-        run: |
-          for script in deploy/scripts/*.sh; do bash -n "$script"; done
-          python -m unittest discover -s deploy/tests -v
-          python deploy/scripts/monitor.py --plan
-      - name: Parse the Swarm stack using non-secret placeholders
-        # Validate stack syntax without accessing a Swarm or registry.
-        # 无需访问 Swarm 或镜像仓库即可验证 stack 配置语法。
-        env:
-          AGENTHUB_IMAGE: ghcr.io/example/agenthub/backend:validation
-          POSTGRES_IMAGE: postgres:17-bookworm
-          POSTGRES_DATA_PATH: /mnt/validation/postgres
-          DB_PASSWORD_SECRET: validation-db
-          BOOTSTRAP_PASSWORD_SECRET: validation-bootstrap
-          OPENAI_API_KEY_SECRET: validation-openai
-        run: |
-          docker stack config -c deploy/swarm/stack.yaml > /dev/null
-          REPLY_MODE=openai docker stack config -c deploy/swarm/stack.yaml -c deploy/swarm/openai.yaml > /dev/null
-
-  # Require both the tested image and the deployment checks before pushing.
-  # 测试镜像就绪且部署检查通过后，才推送镜像。
   publish:
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
-    needs: [required-checks, delivery-checks]
+    needs: required-checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Grant package write access only to the publishing job.
@@ -78,7 +42,7 @@ jobs:
         with:
           name: runtime-image-${{ github.run_id }}
           path: ${{ runner.temp }}/runtime
-      - name: Publish the exact runtime image that passed CI
+      - name: Build and publish the release from the tested runtime
         id: publish
         # Pull by digest and compare image IDs before publishing deployment instructions.
         # 按摘要拉取镜像并比对 ID，然后输出部署所需的镜像信息。
@@ -92,7 +56,11 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY,,}/backend"
           tag="sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker load --input "$RUNNER_TEMP/runtime/agenthub-runtime.tar"
-          docker tag agenthub-ci-backend:dev "$image:$tag"
+          docker build --pull=false --provenance=false \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag "$image:$tag" - <<< 'FROM agenthub-ci-backend:dev'
+          release_id=$(docker image inspect "$image:$tag" --format '{{.Id}}')
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           push_log="$RUNNER_TEMP/docker-push.log"
           docker push "$image:$tag" 2>&1 | tee "$push_log"
@@ -102,10 +70,9 @@ jobs:
             exit 1
           fi
           docker pull "$image@$digest" >/dev/null
-          tested_id=$(docker image inspect agenthub-ci-backend:dev --format '{{.Id}}')
           published_id=$(docker image inspect "$image@$digest" --format '{{.Id}}')
-          if [[ $tested_id != "$published_id" ]]; then
-            echo '::error::Published digest does not match the runtime image tested by CI'
+          if [[ $release_id != "$published_id" ]]; then
+            echo '::error::Published digest does not match the release built from the tested runtime'
             exit 1
           fi
           printf 'Tested revision: `%s`\n\nVersioned image: `%s:%s`\n\nDeploy by digest: `%s`\n' "$GITHUB_SHA" "$image" "$tag" "$image@$digest" >> "$GITHUB_STEP_SUMMARY"
@@ -115,20 +82,22 @@ jobs:
         run: docker logout ghcr.io
 
   deliver:
-    name: ${{ inputs.operation }} ${{ needs.publish.outputs.digest || inputs.rollback_digest }}
+    name: ${{ inputs.operation || 'deploy' }} ${{ needs.publish.outputs.digest || inputs.rollback_digest }}
     needs: publish
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' &&
-          ((inputs.operation == 'deploy' && needs.publish.result == 'success') ||
-           (inputs.operation == 'rollback' && needs.publish.result == 'skipped')) }}
+          (((github.event_name == 'push' || inputs.operation == 'deploy') && needs.publish.result == 'success') ||
+           (github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback' && needs.publish.result == 'skipped')) }}
     environment: production
     runs-on: ${{ vars.DELIVERY_RUNNER || 'ubuntu-latest' }}
     concurrency:
       group: agenthub-production
+      queue: max
       cancel-in-progress: false
     timeout-minutes: 60
     permissions:
       actions: read
+      contents: read
     steps:
       - name: Verify independent production approval
         env:
@@ -149,10 +118,21 @@ jobs:
                       and any(env.get("name") == "production" for env in review.get("environments", [])))
           sys.exit(0 if actor > 0 and isinstance(reviews, list) and any(map(approved, reviews)) else 1)
           '
+      - name: Check that the approved deployment is still current
+        if: inputs.operation != 'rollback'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ $head != "$GITHUB_SHA" ]]; then
+            echo '::error::main has advanced. Review the release for the newer revision.'
+            exit 1
+          fi
       - name: Request the approved manager operation
         shell: bash
         env:
-          OPERATION: ${{ inputs.operation }}
+          OPERATION: ${{ inputs.operation || 'deploy' }}
           PUBLISHED_DIGEST: ${{ needs.publish.outputs.digest }}
           ROLLBACK_DIGEST: ${{ inputs.rollback_digest }}
           TARGET: ${{ vars.DELIVERY_SSH_TARGET }}

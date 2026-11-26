@@ -35,8 +35,9 @@ needed. Only workers receive the key, not API, database, or setup containers.
 ## Deployment and recovery
 
 Follow [the approved release procedure](CLOUD_DEPLOYMENT.md#approved-rolling-releases-and-rollback),
-including its production approval gate. The browser-session migration runs before
-API/worker updates. Merging the PR alone does not deploy it.
+including its production approval gate. A merge to main automatically tests and
+publishes the candidate and requests approval. After approval the Manager runs
+migrations before updating API and worker replicas.
 
 With `REPLY_MODE=openai`, the staged deployment layers `swarm/openai.yaml` over
 `swarm/stack.yaml`. Local checks default to fixed replies and require no key.
@@ -46,7 +47,10 @@ Manual parsing for OpenAI uses both files:
 docker stack config -c deploy/swarm/stack.yaml -c deploy/swarm/openai.yaml > /dev/null
 ```
 
-Rolling releases reconcile provider settings as well as images. Both APIs and
+Rolling releases verify the configured mode against both running services and
+the OpenAI model and mounted secret name against the worker before migration.
+Use the running values when [initializing delivery](CLOUD_DEPLOYMENT.md#one-time-manager-initialization).
+Both APIs and
 workers receive the requested mode; workers alone receive the model and secret
 mount. A startup wrapper reads `/run/secrets/openai_api_key` into the worker
 process environment without printing it or storing its value in the Docker
@@ -54,8 +58,9 @@ service specification. It also supports older images using `OPENAI_API_KEY`.
 
 If the image is already running, configuration is still applied without rerunning
 migration or replacing the existing image rollback record. Image rollback retains
-the manager's desired provider settings. For scripted fallback, set
-`REPLY_MODE=fixed` before rollout/rollback; the OpenAI mount is removed.
+the running provider settings. Switching provider, model or key is a separate
+configuration change. Use the approved staged maintenance procedure for it,
+then synchronize the delivery config before resuming rolling releases.
 
 ## Verification
 

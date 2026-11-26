@@ -40,7 +40,7 @@ See [worker.py](../backend/app/worker.py), [security.py](../backend/app/security
 | Docker | Builds the runtime image and a separate test image | Packages the Python environment with the code so teammates and CI can run the same application setup |
 | Docker Compose | Connects API, worker, PostgreSQL, migration and account initialization services | Defines startup order, networks, volumes and isolated project names in one shared file, usable on a developer machine or a shared server |
 | Git | Tracks source, migrations, dependency files and documentation | Branches and reviewed commits let contributors coordinate changes |
-| GitHub Actions | Builds containers, checks code, runs database tests and verifies the live service path | Gives pull requests a shared verification process before integration; remote deployment is not configured yet |
+| GitHub Actions | Tests pull requests and merged commits, publishes the release to GHCR and requests production approval | Runs the reviewed Swarm rollout over SSH with the published digest |
 | uv and pip | uv generates resolved dependency files; pip installs them while building images | Maintainers can resolve versions once and Docker installs the reviewed list. uv is a maintenance tool, not a required runtime service |
 
 The project requires a running Docker Engine and Compose v2 or newer with `--wait` support. Host Docker and uv versions are not pinned by the application. The images use `python:3.13-slim-bookworm` and `postgres:17-bookworm`; these tags select version families rather than immutable image digests.
