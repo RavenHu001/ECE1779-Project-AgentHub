@@ -53,7 +53,7 @@ After startup:
 
 ## Team workflow and shared access
 
-Develop on separate branches and submit pull requests. PRs run **Backend CI** with an isolated PostgreSQL database and fixed-mode API/worker smoke tests. Merging into protected `main` automatically starts **Release runtime image**. After CI passes on the merged SHA, it builds and publishes the release to GHCR and requests independent `production` approval. Approval starts the digest-pinned SSH rollout on the DigitalOcean Manager. Manual rollback remains available. See the [GitHub Owner settings and rollback procedure](docs/CLOUD_DEPLOYMENT.md#approved-rolling-releases-and-rollback) and [one-time Manager commands](docs/CLOUD_DEPLOYMENT.md#one-time-manager-initialization).
+Develop on separate branches and submit pull requests. PRs run **Backend CI** with isolated PostgreSQL and fixed-mode smoke tests. An independent reviewer approves the final PR head. Merging into protected `main` starts **Release runtime image**, which verifies the PR authorization and tests the merged SHA. After both pass, it publishes to GHCR and automatically deploys the verified digest over SSH. The Manager runs migrations, rolls the API and worker replicas and checks their health. Manual rollback requires separate approval in the `production` Environment. See the [Owner settings and rollback procedure](docs/CLOUD_DEPLOYMENT.md#approved-rolling-releases-and-rollback) and [one-time Manager commands](docs/CLOUD_DEPLOYMENT.md#one-time-manager-initialization).
 
 For a shared **development** Compose environment, one maintainer updates it after merge:
 

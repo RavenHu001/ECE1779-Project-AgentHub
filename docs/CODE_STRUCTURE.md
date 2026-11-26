@@ -118,7 +118,7 @@ Alembic records the applied revision in `alembic_version` and executes pending r
 | `backend/tests/test_event_store.py` and `backend/tests/test_events.py` | Cover event ordering and rollback, plus snapshot and SSE cursor behavior |
 | `.github/workflows/ci.yml` | Builds images, runs checks and database tests, then starts services and runs the smoke check |
 
-Integration tests exercise controlled success and failure conditions. `smoke.py` checks HTTP communication between running services. On a main push, `.github/workflows/release.yml` calls CI, publishes the tested runtime with revision metadata and requests production approval for the digest-pinned rollout.
+Integration tests exercise controlled success and failure conditions. `smoke.py` checks HTTP communication between running services. On a main push, `.github/workflows/release.yml` verifies independent PR review, runs CI and publishes the tested runtime with revision metadata. The Manager rolls out that digest automatically. Manual rollback uses a separate approval.
 
 ## Configuration and documentation
 

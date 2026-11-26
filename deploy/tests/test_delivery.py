@@ -286,6 +286,26 @@ service_healthy test_api 1 30 '' "$CANDIDATE"
             self.assertNotEqual(result.returncode, 0)
 
 
+    def test_forced_ssh_keys_are_scoped_to_one_operation(self):
+        startup = self.directory / "startup.sh"
+        startup.write_text(
+            'source() { if [[ $1 == /etc/agenthub-delivery/config ]]; then echo authorized; exit 0; fi; '
+            'builtin source "$@"; }\n', newline="\n",
+        )
+        for operation in ("deploy", "rollback"):
+            env = dict(os.environ, SSH_ORIGINAL_COMMAND=f"{operation} sha256:" + "a" * 64,
+                       BASH_ENV=bash_path(startup))
+            result = subprocess.run([BASH, bash_path(SCRIPTS / "rollout.sh"), operation],
+                                    env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "authorized")
+            for arguments in ([], ["rollback" if operation == "deploy" else "deploy"], [operation, "extra"]):
+                result = subprocess.run([BASH, bash_path(SCRIPTS / "rollout.sh"), *arguments],
+                                        env=env, capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("not permitted by this delivery key", result.stderr)
+
+
 class VolumeTests(unittest.TestCase):
     def check(self, uuid="expected", options="rw,relatime", percent=79):
         cmd = r'''
@@ -317,14 +337,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(release.count("uses: ./.github/workflows/ci.yml"), 1)
         self.assertNotIn("unittest discover", release)
         publish = release.split("\n  publish:\n")[1].split("\n  deliver:\n")[0]
-        self.assertIn("needs: required-checks", publish)
+        self.assertIn("needs: [verify-reviewed-merge, required-checks]", publish)
+        self.assertIn("run: python3 .github/scripts/verify_release_pr.py", release)
         self.assertIn("FROM agenthub-ci-backend:dev", publish)
         self.assertIn("github.event_name == 'push' || inputs.operation == 'deploy'", release)
         self.assertIn("OPERATION: ${{ inputs.operation || 'deploy' }}", release)
         self.assertIn("github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback'", release)
         self.assertNotIn("cancel-in-progress: true", release)
         self.assertIn("group: agenthub-production\n      queue: max\n      cancel-in-progress: false", release)
-        self.assertLess(release.index("Verify independent production approval"), release.index("Request the approved manager operation"))
+        self.assertLess(release.index("Verify independent rollback approval"), release.index("Request the approved manager operation"))
 
     def test_superseded_or_unverifiable_main_revision_stops_before_ssh(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
@@ -337,9 +358,10 @@ class WorkflowTests(unittest.TestCase):
             result = subprocess.run([BASH, "-c", fake + script], env=env, capture_output=True, timeout=5)
             self.assertEqual(result.returncode == 0, accepted)
 
-    def test_approval_command_requires_independent_production_reviewer(self):
+    def test_only_manual_rollback_uses_independent_environment_approval(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
-        step = workflow.split("      - name: Verify independent production approval\n", 1)[1]
+        step = workflow.split("      - name: Verify independent rollback approval\n", 1)[1]
+        self.assertTrue(step.startswith("        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback'\n"))
         script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
         fake = r'''
 gh() {
@@ -371,7 +393,8 @@ python3() { "$TEST_PYTHON" "$@"; }
     def test_ssh_request_uses_only_the_digest_approved_for_the_operation(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
         job = workflow.split("\n  deliver:\n", 1)[1]
-        for gate in ["environment: production", "github.ref == 'refs/heads/main'",
+        for gate in ["environment: ${{ inputs.operation == 'rollback' && 'production' || 'production-auto' }}",
+                     "github.ref == 'refs/heads/main'",
                      "needs.publish.result == 'success'", "StrictHostKeyChecking=yes"]:
             self.assertIn(gate, job)
         step = job.split("      - name: Request the approved manager operation\n", 1)[1]

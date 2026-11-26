@@ -35,8 +35,8 @@ needed. Only workers receive the key, not API, database, or setup containers.
 ## Deployment and recovery
 
 Follow [the approved release procedure](CLOUD_DEPLOYMENT.md#approved-rolling-releases-and-rollback),
-including its production approval gate. A merge to main automatically tests and
-publishes the candidate and requests approval. After approval the Manager runs
+including independent review of the final PR head. After merge, CI and PR
+verification gate publication and automatic delivery. The Manager runs
 migrations before updating API and worker replicas.
 
 With `REPLY_MODE=openai`, the staged deployment layers `swarm/openai.yaml` over

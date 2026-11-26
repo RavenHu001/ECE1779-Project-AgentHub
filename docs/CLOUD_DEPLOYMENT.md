@@ -113,9 +113,11 @@ builds the release image by adding OCI source and revision labels, and pushes:
 ghcr.io/<lowercase-owner>/<lowercase-repository>/backend:sha-<full-commit>-run-<run-id>-<attempt>
 ```
 
-On a main push, publication automatically requests production approval. Manual
-dispatch on main also supports publish-only (the manual default), deploy for
-recovery, and rollback of the recorded previous digest. Only the publishing job has
+Independent PR review authorizes the release. Publication requires both the
+merged-commit CI result and verified PR evidence. A successful main push run
+then deploys automatically. Manual dispatch on main also supports publish-only
+(the manual default) and deploy retries with the same gates. Manual rollback
+uses the recorded previous digest and requires Environment approval. Only the publishing job has
 `packages: write`; authentication uses the short-lived `GITHUB_TOKEN` via stdin.
 The archive contains the runtime image, not the test image or generated `.env`.
 The artifact expires after one day. Only the release caller requests it.
@@ -179,31 +181,60 @@ rotation needs a separate coordinated procedure; changing names alone is unsafe.
 
 ## Approved rolling releases and rollback
 
-Before the first merge, the Owner configures the controls below and the operator
-completes [Manager initialization](#one-time-manager-initialization).
+After the team approves moving production authorization to PR review, the Owner
+records that decision and configures the controls below. Finish the
+[Manager initialization](#one-time-manager-initialization) and provision both
+environments before merging this workflow. Provisioning the deploy-only key
+in `production-auto` enables unattended delivery.
 
 | GitHub setting | Required configuration |
 | --- | --- |
 | Branch protection or ruleset for `main` | Require pull requests, independent approving review, dismissal of stale approvals, up-to-date branches and the PR check `containers-and-tests` from GitHub Actions (workflow **Backend CI**). Apply to admins, disallow bypass, force pushes and deletions. The post-merge publish/delivery jobs run only after merge. |
-| Settings → Environments → `production` | Allow only the selected branch `main`. Configure required reviewers, prevent self-review and disable administrator bypass. Confirm the repository plan supports required reviewers for its visibility. |
-| Environment secrets | `DELIVERY_SSH_KEY` contains the dedicated forced-command private key. `DELIVERY_KNOWN_HOSTS` contains one independently verified `agenthub-manager ssh-ed25519 <host-public-key>` line. |
-| Environment variable | `DELIVERY_SSH_TARGET=<delivery-user>@201.79.149.128`. Match the account in the Manager setup. |
+| Environment `production-auto` | Allow only the selected branch `main` (no tags). Configure zero required Environment reviewers and no wait timer. Supply the **deploy-only** SSH key here. |
+| Existing Environment `production` | Reserve for manual rollback. Allow only the selected branch `main`, configure required reviewers, prevent self-review and disable administrator bypass. Confirm the repository plan supports these protections. Supply the **rollback-only** SSH key here. |
+| Secrets in each Environment | Set `DELIVERY_SSH_KEY` to that environment's distinct private key. Set `DELIVERY_KNOWN_HOSTS` to the independently verified `agenthub-manager ssh-ed25519 <host-public-key>` line. Keep both private keys out of repository and organization secrets. |
+| Variable in each Environment | Set `DELIVERY_SSH_TARGET=<delivery-user>@201.79.149.128`. Match the account in the Manager setup. |
 | Repository variable | `DELIVERY_RUNNER` selects a trusted Linux runner with Bash, OpenSSH, gh, Python 3 and approved SSH egress. The default is `ubuntu-latest`. Allowlist the runner's egress at the Manager firewall. Keep a private delivery runner isolated from untrusted PR workloads. |
 | Actions and GHCR | Enable Actions and allow this repository to publish the backend package with its job-scoped `GITHUB_TOKEN` (`packages: write`). Grant the repository Actions write access on an existing package if needed. Keep SSH credentials environment-scoped and database, OpenAI and Spaces credentials on the hosts. |
 
-A normal merge needs no **Run workflow** click. Review the commit and verified
-digest in the publish summary, capacity for one start-first task, the latest
-verified backup and schema compatibility with both application versions. An
-independent reviewer selects **Review deployments**. Before SSH the runner
-checks this run's production approval, verifies a human reviewer with a different
-numeric ID from the initiating actor, and checks the commit is still main's tip.
-If main advanced during review, reject the superseded request and review the
-newer run. Production deploys and rollbacks share one queue with cancellation
-disabled. Later commits can run CI while a release awaits approval. A new merge
-cannot interrupt an active migration.
+Once the two restricted environments exist, the Owner can generate and load
+their noninteractive keys from a trusted workstation. Use a new private
+directory outside the checkout and the Owner's authenticated GitHub CLI.
+Transfer only the two `.pub` files to the Manager for step 4 below.
+
+```bash
+set -euo pipefail
+umask 077
+mkdir -m 0700 "$HOME/agenthub-delivery-keys"
+cd "$HOME/agenthub-delivery-keys"
+for operation in deploy rollback; do
+  ssh-keygen -t ed25519 -N '' -f "agenthub-$operation"
+done
+gh secret set DELIVERY_SSH_KEY --repo RavenHu001/ECE1779-Project-AgentHub --env production-auto < agenthub-deploy
+gh secret set DELIVERY_SSH_KEY --repo RavenHu001/ECE1779-Project-AgentHub --env production < agenthub-rollback
+```
+
+At PR review, check migration compatibility with both application versions,
+capacity for one start-first task and backup readiness. Require a repository
+writer other than the PR author to approve the final PR head. Protect changes
+to workflows, authorization code, Manager scripts and migrations through the
+same rules. GitHub enforces the PR status check at merge. After merge, the
+release separately runs CI on the resulting commit. A read-only job checks
+that main is protected, the release SHA is the merge result of exactly one PR
+into this repository's main, and an independent human writer approved that
+PR head before merge. It accounts for dismissed and superseded decisions.
+A direct push without matching evidence fails before publication. API errors
+fail closed. See [GitHub PR reviews](https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request).
+
+After publication the runner rechecks the tip of protected main immediately
+before SSH. If main advanced, the newer release takes over. Deploy and rollback
+share one queue with cancellation disabled. A new merge cannot interrupt an
+active migration.
 The Manager lock also excludes backups and staged deployments. If the lock is
 busy, resolve contention and use a **fresh** main deploy dispatch for recovery.
-Re-running jobs on an old approval fails the run-attempt check.
+A fresh deploy retry requires the same PR proof, CI and current main SHA.
+Rollback requires a fresh dispatch and an independent review of that run
+in `production`. Re-running a rollback with an old approval fails.
 See [environment protections](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 and [workflow concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
@@ -222,7 +253,7 @@ The private `/var/lib/agenthub-delivery/<stack>.release` file contains
 `phase previous-image candidate-image`. A timeout or failed health gate
 leaves recovery information there. For **pending** or **deployed**, dispatch
 **rollback** on `main` with the recorded previous `sha256:…` digest and obtain
-production approval. This rolls only API and worker and repeats the health
+independent approval in `production`. This rolls only API and worker and repeats the health
 checks. It preserves the applied schema and keeps setup dormant. A second
 deployment is blocked during a pending rollout. Swarm tasks can continue
 after an SSH disconnect.
@@ -235,27 +266,12 @@ lock before a fresh approved dispatch. Use the staged maintenance procedure
 for incompatible changes. Keep the bootstrap configuration's application
 digest synchronized with the healthy release before using that procedure.
 
-### Fully automatic deployment after a policy decision
-
-The current policy requires human approval after publication. Removing the
-Environment reviewer alone leaves the in-workflow approval check closed. If the
-team formally accepts independent PR review as the production authorization,
-record that decision and use a separately reviewed change to both controls.
-For example, require code-owner review for workflows, deployment scripts and
-migrations on protected main, verify that the push SHA came through the required
-PR and checks, and replace the post-merge human gate for **push deploys only**
-with that verified evidence. Retain main-only environment secrets, digest and
-head verification, serialization and the Manager lock. Keep manual recovery
-behind independent Environment approval (a separately protected recovery
-environment if the deployment environment drops its reviewers). Rehearse a
-denied change, an authorized merge and rollback before enabling that policy.
-
 ## One-time Manager initialization
 
 These commands target the existing `agenthub` stack on `201.79.149.128`.
 Use the existing privileged deployment identity with its verified
 `agenthub-worker` alias and registry logins. The example assumes root already
-has key-only SSH access and uses a **new, command-restricted key** for Actions.
+has key-only SSH access and uses **two new, command-restricted keys** for Actions.
 For a dedicated Unix delivery account, set the GitHub target accordingly,
 install the key in that user's authorized keys, and grant it read access to
 the config and PG directory, Docker/worker access and write access to the
@@ -264,7 +280,7 @@ root-owned. Preserve the site's SSH policy.
 
 **1. Install the reviewed files.** In a root Bash session, use the full SHA
 of the reviewed CD revision available in this checkout (or fetch the reviewed
-branch first). Run before approving the first delivery. Repeat the script
+branch first). Install this revision before merging the first automatic release. Repeat the script
 installation during a quiet window when a later release changes Manager code.
 
 ```bash
@@ -339,22 +355,28 @@ curl -fsS https://201-79-149-128.sslip.io/health
 systemctl list-timers agenthub-backup.timer
 ```
 
-**4. Enroll the restricted deployment key.** Generate a fresh Ed25519 key pair
-on a trusted owner workstation. Put its private half in the production
-Environment and securely copy just the public key to
-`/root/agenthub-delivery.pub`. On the Manager, append the restricted entry and
-preserve existing operator keys. From a trusted console obtain the Manager
-host-key fingerprint and alias line for `DELIVERY_KNOWN_HOSTS`.
+**4. Enroll operation-specific keys.** Generate two distinct, fresh Ed25519
+key pairs on a trusted Owner workstation. Copy their public keys to the Manager
+as `/root/agenthub-deploy.pub` and `/root/agenthub-rollback.pub`. Store each
+private key in its matching Environment. If upgrading an existing installation,
+install the updated rollout script and replace the old delivery credential.
+The old forced command without an operation argument will fail closed. Retire
+its authorized-key entry after cutover, preserving unrelated operator keys.
+From a trusted console obtain the Manager host-key fingerprint and alias line.
 
 ```bash
 install -d -m 0700 /root/.ssh
 touch /root/.ssh/authorized_keys
 chmod 0600 /root/.ssh/authorized_keys
-ssh-keygen -lf /root/agenthub-delivery.pub
-read -r key_type key_body _ < /root/agenthub-delivery.pub
-[[ $key_type == ssh-ed25519 ]]
-entry="restrict,command=\"/usr/bin/timeout --kill-after=10s 55m /bin/bash /opt/agenthub/deploy/scripts/rollout.sh\" $key_type $key_body"
-grep -Fqx -- "$entry" /root/.ssh/authorized_keys || printf '\n%s\n' "$entry" >> /root/.ssh/authorized_keys
+deploy_fp=$(ssh-keygen -lf /root/agenthub-deploy.pub | awk '{print $2}')
+rollback_fp=$(ssh-keygen -lf /root/agenthub-rollback.pub | awk '{print $2}')
+[[ -n $deploy_fp && -n $rollback_fp && $deploy_fp != "$rollback_fp" ]]
+for operation in deploy rollback; do
+  read -r key_type key_body _ < "/root/agenthub-$operation.pub"
+  [[ $key_type == ssh-ed25519 ]]
+  entry="restrict,command=\"/usr/bin/timeout --kill-after=10s 55m /bin/bash /opt/agenthub/deploy/scripts/rollout.sh $operation\" $key_type $key_body"
+  grep -Fqx -- "$entry" /root/.ssh/authorized_keys || printf '\n%s\n' "$entry" >> /root/.ssh/authorized_keys
+done
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 awk '{print "agenthub-manager", $1, $2}' /etc/ssh/ssh_host_ed25519_key.pub
 ```
@@ -595,7 +617,7 @@ test filesystem. Provisioning still requires a separate decision.
 
 Outstanding acceptance evidence includes a successful [independent restore drill](CLOUD_OPERATIONS.md#test-one-restore-in-isolation),
 public certificate issuance and renewal with authenticated SSE through the deployed hostname,
-and an independently approved deploy and application-only rollback on a two-node rehearsal stack.
+and an automatic PR-authorized deploy and independently approved application-only rollback on a two-node rehearsal stack.
 The offline delivery tests simulate GitHub reviews and Swarm tasks. The local
 Caddy test verifies the redirect, a locally issued certificate and SSE event arrival.
 

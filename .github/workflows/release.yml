@@ -18,6 +18,22 @@ permissions:
   contents: read
 
 jobs:
+  verify-reviewed-merge:
+    if: github.ref == 'refs/heads/main' && inputs.operation != 'rollback'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify PR authorization for this merge SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/verify_release_pr.py
+
   # Reuse Backend CI so publication uses the runtime image that passed its tests.
   # 复用后端 CI，确保发布的是通过测试的运行镜像。
   required-checks:
@@ -29,7 +45,7 @@ jobs:
   publish:
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
-    needs: required-checks
+    needs: [verify-reviewed-merge, required-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Grant package write access only to the publishing job.
@@ -88,7 +104,7 @@ jobs:
       ${{ !cancelled() && github.ref == 'refs/heads/main' &&
           (((github.event_name == 'push' || inputs.operation == 'deploy') && needs.publish.result == 'success') ||
            (github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback' && needs.publish.result == 'skipped')) }}
-    environment: production
+    environment: ${{ inputs.operation == 'rollback' && 'production' || 'production-auto' }}
     runs-on: ${{ vars.DELIVERY_RUNNER || 'ubuntu-latest' }}
     concurrency:
       group: agenthub-production
@@ -99,7 +115,8 @@ jobs:
       actions: read
       contents: read
     steps:
-      - name: Verify independent production approval
+      - name: Verify independent rollback approval
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -124,9 +141,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          head=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq 'select(.protected == true) | .commit.sha')
           if [[ $head != "$GITHUB_SHA" ]]; then
-            echo '::error::main has advanced. Review the release for the newer revision.'
+            echo '::error::Release SHA must still be the tip of protected main.'
             exit 1
           fi
       - name: Request the approved manager operation

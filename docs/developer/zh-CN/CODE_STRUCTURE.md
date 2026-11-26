@@ -111,7 +111,7 @@ Alembic 用 `alembic_version` 表记录已应用的版本，再执行后续迁�
 | `backend/tests/test_backend.py` | 检查身份验证、消息流程、重复请求、事务、worker 领取权和迁移 |
 | `.github/workflows/ci.yml` | 构建镜像、执行检查和数据库测试，再启动服务执行链路检查 |
 
-集成测试可以控制成功和失败条件，`smoke.py` 验证运行服务之间的 HTTP 链路。合并到 main 后，`.github/workflows/release.yml` 复用 CI，通过后发布带提交标识的镜像，并申请独立生产审批。审批通过后按镜像摘要滚动部署。
+集成测试可以控制成功和失败条件，`smoke.py` 验证运行服务之间的 HTTP 链路。合并到 main 后，`.github/workflows/release.yml` 核验独立 PR 评审并复用 CI。两项通过后发布带提交标识的镜像，自动按摘要滚动部署。手动回滚单独审批。
 
 ## 配置和文档
 

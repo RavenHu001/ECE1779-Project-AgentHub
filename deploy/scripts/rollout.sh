@@ -140,6 +140,7 @@ delivery_main() {
   local request='^(deploy|rollback) (sha256:[0-9a-f]{64})$'
   [[ ${SSH_ORIGINAL_COMMAND:-} =~ $request ]] || fail 'Expected deploy or rollback and one immutable digest'
   local action=${BASH_REMATCH[1]} digest=${BASH_REMATCH[2]}
+  [[ $# == 1 && $1 == "$action" ]] || fail 'Operation is not permitted by this delivery key'
   source /etc/agenthub-delivery/config
   export WORKER_SSH
   [[ -n ${REPLY_MODE:-} ]] || fail 'Explicitly configure the running REPLY_MODE for delivery'
@@ -155,4 +156,4 @@ delivery_main() {
   rollout "$action" "/var/lib/agenthub-delivery/$STACK.release"
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then delivery_main; fi
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then delivery_main "$@"; fi
