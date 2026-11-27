@@ -101,9 +101,9 @@ jobs:
     name: ${{ inputs.operation || 'deploy' }} ${{ needs.publish.outputs.digest || inputs.rollback_digest }}
     needs: publish
     if: >-
-      ${{ !cancelled() && github.ref == 'refs/heads/main' &&
+      !cancelled() && github.ref == 'refs/heads/main' &&
           (((github.event_name == 'push' || inputs.operation == 'deploy') && needs.publish.result == 'success') ||
-           (github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback' && needs.publish.result == 'skipped')) }}
+           (github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback' && needs.publish.result == 'skipped'))
     environment: ${{ inputs.operation == 'rollback' && 'production' || 'production-auto' }}
     runs-on: ${{ vars.DELIVERY_RUNNER || 'ubuntu-latest' }}
     concurrency:

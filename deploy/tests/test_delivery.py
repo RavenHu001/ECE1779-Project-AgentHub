@@ -325,6 +325,32 @@ source "$SCRIPT/check_volume.sh"
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_required_pr_status_cannot_skip_checks_or_publish_after_failure(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")
+        job = ci.split("\n  containers-and-tests:\n", 1)[1]
+        settings, steps = job.split("    steps:\n", 1)
+        # Branch protection requires this job ID as its check name.
+        # 分支保护以此任务 ID 作为必需检查名。
+        self.assertNotRegex(settings, r"(?m)^    (name|if):")
+        required_steps = steps.split("      - name: Export the tested runtime image", 1)[0]
+        self.assertNotRegex(settings + required_steps, r"(?m)^\s*(if|continue-on-error):")
+        for command in ("python -m unittest discover -s deploy/tests", "node --test",
+                        "ruff check . && ruff format --check .", "docker compose run --rm test",
+                        "docker compose exec -T api python -m app.smoke"):
+            self.assertIn(command, required_steps)
+        # With no status override, Actions requires successful completion of both dependencies.
+        # 没有状态覆盖时，Actions 要求这两个依赖都成功后才能执行发布。
+        publish = release.split("\n  publish:\n", 1)[1].split("    steps:", 1)[0]
+        self.assertIn("needs: [verify-reviewed-merge, required-checks]", publish)
+        self.assertNotRegex(publish, r"(?m)^    (if|continue-on-error):")
+        # Keep the folded delivery condition a boolean expression, including when publication fails.
+        # 保持多行部署条件为布尔表达式，发布失败时也不能变成非空字符串。
+        deliver = release.split("\n  deliver:\n", 1)[1]
+        condition = deliver.split("    if: >-\n", 1)[1].split("\n    environment:", 1)[0]
+        self.assertTrue(condition.strip().startswith("!cancelled() &&"))
+        self.assertNotIn("${{", condition)
+
     def test_pr_runs_only_ci_and_main_publishes_after_one_ci(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf8")

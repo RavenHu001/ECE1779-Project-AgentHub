@@ -214,6 +214,35 @@ gh secret set DELIVERY_SSH_KEY --repo RavenHu001/ECE1779-Project-AgentHub --env 
 gh secret set DELIVERY_SSH_KEY --repo RavenHu001/ECE1779-Project-AgentHub --env production < agenthub-rollback
 ```
 
+For the root-based Manager example below, use the existing operator login
+with its independently verified host key to transfer the public halves.
+
+```bash
+scp -o StrictHostKeyChecking=yes agenthub-deploy.pub agenthub-rollback.pub root@201.79.149.128:/root/
+```
+
+Once the Manager operator supplies the alias line and fingerprint from its
+trusted console, verify the fingerprint and save the alias line alone in
+`manager.known_hosts`. From the same Owner workstation, configure the target
+and pin in both environments. Use the approved delivery account and runner
+label. On the first open PR, confirm the required check appears and passes
+before merging. [GitHub CLI required checks](https://cli.github.com/manual/gh_pr_checks)
+
+```bash
+set -euo pipefail
+repo=RavenHu001/ECE1779-Project-AgentHub
+ssh-keygen -lf manager.known_hosts
+read -rp 'Approved Manager SSH account: ' delivery_user
+for environment in production-auto production; do
+  gh variable set DELIVERY_SSH_TARGET --repo "$repo" --env "$environment" --body "$delivery_user@201.79.149.128"
+  gh secret set DELIVERY_KNOWN_HOSTS --repo "$repo" --env "$environment" < manager.known_hosts
+done
+read -rp 'Linux runner label with approved SSH egress: ' runner_label
+gh variable set DELIVERY_RUNNER --repo "$repo" --body "$runner_label"
+read -rp 'Open PR number targeting main: ' pr_number
+gh pr checks "$pr_number" --repo "$repo" --required
+```
+
 At PR review, check migration compatibility with both application versions,
 capacity for one start-first task and backup readiness. Require a repository
 writer other than the PR author to approve the final PR head. Protect changes
@@ -355,10 +384,9 @@ curl -fsS https://201-79-149-128.sslip.io/health
 systemctl list-timers agenthub-backup.timer
 ```
 
-**4. Enroll operation-specific keys.** Generate two distinct, fresh Ed25519
-key pairs on a trusted Owner workstation. Copy their public keys to the Manager
-as `/root/agenthub-deploy.pub` and `/root/agenthub-rollback.pub`. Store each
-private key in its matching Environment. If upgrading an existing installation,
+**4. Enroll operation-specific keys.** Use the public halves supplied by the
+Owner at `/root/agenthub-deploy.pub` and `/root/agenthub-rollback.pub`.
+If upgrading an existing installation,
 install the updated rollout script and replace the old delivery credential.
 The old forced command without an operation argument will fail closed. Retire
 its authorized-key entry after cutover, preserving unrelated operator keys.
